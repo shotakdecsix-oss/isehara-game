@@ -984,21 +984,24 @@ const forestLeafColors = MODE === 'space'   ? [0x66eeff, 0x88ffcc, 0xbb99ff]
                        : MODE === 'meiji'   ? [0x5a8a3a, 0x4f7a33, 0x6a9a45]
                        : [0x2f7a33, 0x3f9a3a, 0x276b2c]; // 現実: はっきりした森の緑
 const forestTrunkMat = new THREE.MeshLambertMaterial({ color: MODE === 'space' ? 0x2a3a4a : 0x4a3524 });
-const forestTrunkP = makePool(new THREE.CylinderGeometry(0.16, 0.26, 2.0, 5), forestTrunkMat, 11000);
+// プレイヤー周囲の一定範囲だけを描くため上限は控えめ(常時描画=重いので)。
+const forestTrunkP = makePool(new THREE.CylinderGeometry(0.16, 0.26, 2.0, 5), forestTrunkMat, 4200);
 const forestLeafPools = forestLeafColors.map(c => makePool(
   MODE === 'space' ? new THREE.ConeGeometry(1.1, 3.2, 6) : new THREE.SphereGeometry(1.5, 6, 5),
   new THREE.MeshLambertMaterial({ color: c }),           // 単色 → instanceColor 不要で確実に描画
-  4000));
-function forestTree(x, z, s) {
+  1700));
+// 木の見た目は「位置から決定」する(乱数を使わない)。こうすると森を再構築しても
+// 同じ場所には同じ木が並び、ちらつき・入れ替わりが起きない。
+function _fhash(a, b) { let h = (a * 374761393 + b * 668265263) | 0; h = (h ^ (h >> 13)) * 1274126177 | 0; return ((h ^ (h >> 16)) >>> 0) / 4294967296; }
+function plantTree(x, z) {
   const gy = getGroundY(x, z);
-  const leaf = forestLeafPools[(Math.random() * forestLeafPools.length) | 0];
-  if (MODE === 'space') { // クリスタル(幹なし)
-    poolAdd(leaf, x, gy + 1.7 * s, z, Math.random() * 3, s, s * 1.3, s);
-    return;
-  }
+  const r1 = _fhash(Math.floor(x * 7.3), Math.floor(z * 7.3));
+  const s = 0.9 + r1 * 1.3;
+  const rot = _fhash(Math.floor(x * 3.1) + 7, Math.floor(z * 5.7) + 3) * 6.283;
+  const leaf = forestLeafPools[(Math.floor(Math.abs(x) * 1.7 + Math.abs(z) * 2.3)) % forestLeafPools.length];
+  if (MODE === 'space') { poolAdd(leaf, x, gy + 1.7 * s, z, rot, s, s * 1.3, s); return; }
   poolAdd(forestTrunkP, x, gy + 1.0 * s, z, 0, s, s, s);              // 幹: 根元を gy に
-  poolAdd(leaf, x, gy + 2.6 * s, z, Math.random() * 3,                // 樹冠: 幹の上に載る球(単色)
-          s * 1.25, s * (1.15 + Math.random() * 0.4), s * 1.25);
+  poolAdd(leaf, x, gy + 2.6 * s, z, rot, s * 1.25, s * 1.3, s * 1.25); // 樹冠: 幹の上に載る球(単色)
 }
 // 道路小物のモード別ふるまい
 const PROP_WIRES   = MODE === 'real';                 // 電線は現実のみ
@@ -2266,25 +2269,22 @@ function getGroundY(x, z) {
   return inside ? Math.max(getTerrainY(x, z), fy) : fy;
 }
 
-// 高さ→頂点カラー: 緑(低地) → 黄土(丘) → 灰(山)。詳細地形と遠景地形で共用
+// 高さ→頂点カラー: 緑(低地) → 深緑(山) → 岩 → 雪。詳細地形と遠景地形で共用
 let terrainMaxH = 1;
+// 岩・雪・森林限界の境界(ゲーム高さ)。実標高(m)基準で loadElevations が設定する。
+// 以前は「詳細エリアの最大高」で正規化していたため、遠景の実際の高山(大山1252m)が
+// 正規化1.0を超えて全部「白い岩」になり、森も詳細エリアの縁で途切れていた。
+// 実標高基準にして、山は中腹まで緑・森、岩と雪は本当に高い所だけにする。
+let ROCK_Y = 1e9, SNOW_Y = 1e9, TREELINE = 1e9;
 function terrainColorRGB(h) {
-  const t = Math.max(0, Math.min(1, h / terrainMaxH));
-  if (MODE === 'space') { // 無機質なグレー→青グレー
-    const g = 0.15 + t * 0.25;
-    return [g * 0.9, g, g * 1.3];
-  }
-  if (MODE === 'edo') { // セピアがかった野山
-    return [0.30 + 0.18 * t, 0.27 + 0.10 * t, 0.16 + 0.06 * t];
-  }
-  if (MODE === 'marchen') { // 明るい緑→ピンクがかった丘
-    return [0.28 + 0.42 * t, 0.60 - 0.12 * t, 0.32 + 0.28 * t];
-  }
-  // 市街地が乗る低標高帯は緑を保ち、中〜高標高帯は「森に覆われた山」の深い緑に。
-  // 岩肌(灰)は頂上付近(t>0.85)に限定して、山全体が森に見えるようにする。
-  if (t < 0.45)      { const k = t / 0.45;          return [0.20 + 0.03*k, 0.34 - 0.03*k, 0.17 - 0.01*k]; }
-  else if (t < 0.85) { const k = (t - 0.45) / 0.4;  return [0.17 - 0.04*k, 0.31 - 0.08*k, 0.15 - 0.02*k]; } // 深い森の緑
-  else               { const k = (t - 0.85) / 0.15; return [0.28 + 0.32*k, 0.29 + 0.28*k, 0.22 + 0.36*k]; } // 岩の頂
+  if (MODE === 'space')   { const t = Math.max(0,Math.min(1,h/terrainMaxH)); const g = 0.15 + t*0.25; return [g*0.9, g, g*1.3]; }
+  if (MODE === 'edo')     { const t = Math.max(0,Math.min(1,h/terrainMaxH)); return [0.30 + 0.18*t, 0.27 + 0.10*t, 0.16 + 0.06*t]; }
+  if (MODE === 'marchen') { const t = Math.max(0,Math.min(1,h/terrainMaxH)); return [0.28 + 0.42*t, 0.60 - 0.12*t, 0.32 + 0.28*t]; }
+  // 現実・明治: 実標高基準。森林限界(約2500m)まで森の緑、2500〜2900mで岩、2900m以上が雪。
+  // 大山・丹沢はいずれも2500m未満なので全山が緑=森になる。
+  if (h < ROCK_Y) { const k = Math.max(0, Math.min(1, h / Math.max(1, ROCK_Y))); return [0.20 - 0.05*k, 0.34 - 0.07*k, 0.17 - 0.03*k]; } // 低地の緑→山地の深緑
+  if (h < SNOW_Y) { const k = (h - ROCK_Y) / Math.max(1, SNOW_Y - ROCK_Y);       return [0.15 + 0.32*k, 0.26 + 0.22*k, 0.13 + 0.22*k]; } // 岩肌
+  const k = Math.min(1, (h - SNOW_Y) / Math.max(1, SNOW_Y - ROCK_Y));            return [0.55 + 0.35*k, 0.58 + 0.32*k, 0.56 + 0.38*k];   // 雪
 }
 // 起動直後も緑の地面で初期化(elevData ロード後に applyTerrain が再サンプリングする)
 updateFarMesh(true);
@@ -2357,6 +2357,11 @@ async function loadElevations() {
   }
 
   elevBase = Math.min(...elevs);
+  // 岩・雪・森林限界の高さ境界を実標高基準で確定(applyTerrain の着色前に必要)。
+  // 本州中部の森林限界は約2500m。丹沢(〜1673m)・大山(1252m)はこれより低く、頂上まで森。
+  ROCK_Y   = (2500 - elevBase) * ELEV_SCALE; // これ以上で岩肌(この一帯には基本存在しない)
+  SNOW_Y   = (2900 - elevBase) * ELEV_SCALE; // これ以上で雪
+  TREELINE = (2500 - elevBase) * ELEV_SCALE; // 森林限界≈2500m。大山・丹沢は全山が森になる
   elevData = elevs.map(e => Math.max(0, e - elevBase) * ELEV_SCALE);
   applyTerrain();
   // 地形確定後、松明ライトを地表の高さに再配置(固定y=4のままだと丘に埋まる)
@@ -2646,8 +2651,7 @@ async function loadOSM() {
     const sp = findSpawnNear(spw.x, spw.z); // 建物内なら最寄りの空き地点へ
     player.position.set(sp.x, 0, sp.z);
   }
-  seedInitialForest(); // 見えている丘に森を一括で敷く
-  initialWorldLoaded = true; // ここからタイル取得を許可(標高は既に反映済み)
+  initialWorldLoaded = true; // ここからタイル取得を許可(標高は既に反映済み)。森は updateForest が周囲に描く
 }
 
 function buildFallbackMap() {
@@ -2680,7 +2684,6 @@ function buildFallbackMap() {
     const sp2 = findSpawnNear(spw2.x, spw2.z);
     player.position.set(sp2.x, 0, sp2.z);
   }
-  seedInitialForest();
   initialWorldLoaded = true;
 }
 
@@ -3599,61 +3602,54 @@ function processChunkQueue() {
   generateChunk(c.x, c.z);
 }
 
-// ======= 山の森(高標高スロープに針葉樹を散布) =======
-// 2系統: (A) 起動時に見えている詳細エリア全体の丘へ一括散布(スポーンから森が見える)、
-//         (B) プレイヤー追従ストリーミングで、詳細エリアの外(大山方面など)を歩くと森が続く。
-const FOREST_CELL = 90;       // ストリーミングのセル辺(m)
-const FOREST_RADIUS = 9;      // ±9セル ≈ 810m
-const FOREST_MIN_T = 0.30;    // 標高比 t=h/terrainMaxH がこれ以上を「山」とみなす。
-                              // 低めにして手前の中腹にも森を出し、近くで緑の樹冠が見えるようにする
-const forestCells = new Set();
-let _forestLastCX = Infinity, _forestLastCZ = Infinity;
-let initialForestDone = false;
+// ======= 山の森(プレイヤー周囲の一定範囲だけを描く=軽量) =======
+// 木は建物・道路と同じく「近くだけ」描く。プレイヤーが一定距離動いたら森を作り直す。
+// 木の位置・見た目は座標から決まる(plantTree)ので、作り直しても同じ木が並び、ちらつかない。
+// 建物・道路のチャンクは半径 CHUNK_RADIUS で生成され CHUNK_RADIUS+2 で消える。
+// 森はその中間(+1)に合わせ、建物と木が同じくらいの距離で現れ・消えるようにする。
+const FOREST_R = (CHUNK_RADIUS + 1) * CHUNK_SIZE;  // 例: (3+1)*120 = 480m
+const FOREST_REBUILD_STEP = CHUNK_SIZE / 2;        // 60mごとに再構築(建物の出現範囲に追従)
+const FOREST_MIN_H = 30;          // 局所比高がこの高さ(≈15m)以上を「山」とみなす(平地の街には生えない)
+const FOREST_SCATTER = 30;        // 散布グリッド間隔(m)
+let _forestBX = Infinity, _forestBZ = Infinity;
 
-// 標高「比」で山を判定する(絶対高さだと、低地から高い街全体が森になってしまうため)
-function scatterForestCell(bx, bz, cell) {
-  const h = getGroundY(bx + cell / 2, bz + cell / 2);
-  const t = h / Math.max(1, terrainMaxH);
-  if (t < FOREST_MIN_T) return;
-  const dens = Math.min(20, 3 + Math.floor((t - FOREST_MIN_T) * 28)); // 高いほど密に
-  for (let i = 0; i < dens; i++) {
-    const x = bx + Math.random() * cell;
-    const z = bz + Math.random() * cell;
-    if (isOnRoad(x, z, 3, 3)) continue;
-    if (hasBuildingNearby(x, z, 7)) continue;
-    forestTree(x, z, 0.9 + Math.random() * 1.3);
-  }
-}
+function resetPool(p) { p.n = 0; p.mesh.count = 0; p.mesh.instanceMatrix.needsUpdate = true; }
 
-// (A) 起動時: 詳細エリア(±WORLD/2)の丘へ一括で森を敷く。スポーン地点から見える北西の丘が森になる。
-function seedInitialForest() {
-  if (initialForestDone) return;
-  const step = 55;
-  for (let x = -WORLD_W/2; x < WORLD_W/2; x += step)
-    for (let z = -WORLD_D/2; z < WORLD_D/2; z += step)
-      scatterForestCell(x, z, step);
-  initialForestDone = true;
-}
-
-// (B) ストリーミング: プレイヤー周囲のセルに森を追加。詳細エリア内は(A)で敷き済みなので二重配置しない。
-function updateMountainForest() {
+// プレイヤー周囲 FOREST_R 内の山(FOREST_MIN_H〜TREELINE)へ木を敷き直す
+function rebuildForest() {
   if (!elevData) return;
-  const pcx = Math.floor(player.position.x / FOREST_CELL);
-  const pcz = Math.floor(player.position.z / FOREST_CELL);
-  if (pcx === _forestLastCX && pcz === _forestLastCZ) return; // セルをまたいだ時だけ処理
-  _forestLastCX = pcx; _forestLastCZ = pcz;
-  for (let dx = -FOREST_RADIUS; dx <= FOREST_RADIUS; dx++)
-    for (let dz = -FOREST_RADIUS; dz <= FOREST_RADIUS; dz++) {
-      const gx = pcx + dx, gz = pcz + dz;
-      const key = gx + ',' + gz;
-      if (forestCells.has(key)) continue;
-      forestCells.add(key);
-      const bx = gx * FOREST_CELL, bz = gz * FOREST_CELL;
-      // 詳細エリア内は起動時の一括散布に任せる(二重配置防止)
-      const ccx = bx + FOREST_CELL / 2, ccz = bz + FOREST_CELL / 2;
-      if (initialForestDone && ccx > -WORLD_W/2 && ccx < WORLD_W/2 && ccz > -WORLD_D/2 && ccz < WORLD_D/2) continue;
-      scatterForestCell(bx, bz, FOREST_CELL);
+  resetPool(forestTrunkP);
+  forestLeafPools.forEach(resetPool);
+  const px = player.position.x, pz = player.position.z;
+  const R = FOREST_R, R2 = R * R, cell = FOREST_SCATTER;
+  const gx0 = Math.floor((px - R) / cell), gx1 = Math.floor((px + R) / cell);
+  const gz0 = Math.floor((pz - R) / cell), gz1 = Math.floor((pz + R) / cell);
+  for (let gx = gx0; gx <= gx1; gx++)
+    for (let gz = gz0; gz <= gz1; gz++) {
+      const cx = gx * cell, cz = gz * cell;
+      const h = getGroundY(cx + cell / 2, cz + cell / 2);
+      if (h < FOREST_MIN_H || h > TREELINE) continue; // 平地・森林限界より上は除外
+      const dens = Math.min(9, 2 + ((h - FOREST_MIN_H) / 45 | 0)); // 高いほど密(控えめ=軽量)
+      for (let i = 0; i < dens; i++) {
+        const x = cx + _fhash(gx * 92821 + i, gz * 68917) * cell;
+        const z = cz + _fhash(gx * 40503, gz * 51787 + i * 131) * cell;
+        const dx = x - px, dz = z - pz;
+        if (dx * dx + dz * dz > R2) continue;         // 円形範囲に収める
+        if (isOnRoad(x, z, 3, 3)) continue;
+        if (hasBuildingNearby(x, z, 6)) continue;
+        plantTree(x, z);
+      }
     }
+}
+
+// プレイヤーが FOREST_REBUILD_STEP 以上動いたら森を作り直す
+function updateForest() {
+  if (IS_MEIJI ? !meijiReady : !initialWorldLoaded) return;
+  const bx = Math.round(player.position.x / FOREST_REBUILD_STEP);
+  const bz = Math.round(player.position.z / FOREST_REBUILD_STEP);
+  if (bx === _forestBX && bz === _forestBZ) return;
+  _forestBX = bx; _forestBZ = bz;
+  rebuildForest();
 }
 
 // ======= ANIMATION LOOP =======
@@ -3799,8 +3795,8 @@ function animate() {
   // Tile-based OSM fetch — loads roads/buildings for newly entered areas
   checkOSMTiles();
 
-  // 山の森ストリーミング(高標高セルに針葉樹を散布)
-  updateMountainForest();
+  // 山の森(プレイヤー周囲だけ・移動で作り直し)
+  updateForest();
 
   // 空・星・遠景地形をカメラ/プレイヤーに追従させる
   // (固定のままだと移動やマップジャンプで far クリップ外に出て「空が消える」)
