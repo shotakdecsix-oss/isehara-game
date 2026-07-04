@@ -150,6 +150,15 @@ body { overflow:hidden; background:#000; font-family:'Segoe UI',sans-serif; }
   pointer-events:all; z-index:20;
 }
 #camDirBtn:hover { background:rgba(70,70,100,0.9); }
+#seaCtrl {
+  position:fixed; top:216px; left:16px;
+  background:rgba(20,50,80,0.85); color:#bfe6ff;
+  border:1px solid rgba(80,180,255,0.6); border-radius:8px;
+  padding:6px 10px; font-size:12px; width:190px;
+  pointer-events:all; z-index:20; touch-action:none;
+  box-shadow:0 0 12px rgba(64,160,255,0.3);
+}
+#seaCtrl input { width:100%; margin-top:5px; accent-color:#40c0ff; }
 /* UI非表示トグル(常時表示。スティック・ジャンプ・このボタン以外を隠す) */
 #uiToggleBtn {
   position:fixed; top:16px; right:16px;
@@ -162,7 +171,7 @@ body { overflow:hidden; background:#000; font-family:'Segoe UI',sans-serif; }
 body.uiHidden #info, body.uiHidden #viewBtn, body.uiHidden #mapBtn,
 body.uiHidden #jumpBtn, body.uiHidden #modeBtn, body.uiHidden #camDirBtn,
 body.uiHidden #gpsDisplay, body.uiHidden #minimap, body.uiHidden #credit,
-body.uiHidden #status { display:none !important; }
+body.uiHidden #seaCtrl, body.uiHidden #status { display:none !important; }
 body.uiHidden #uiToggleBtn { opacity:0.45; }
 </style>
 </head>
@@ -173,6 +182,7 @@ body.uiHidden #uiToggleBtn { opacity:0.45; }
 <button id="jumpBtn">📍 マップジャンプ</button>
 <button id="modeBtn">🏙 現実</button>
 <button id="camDirBtn">🔄 視点</button>
+<div id="seaCtrl">🌊 海面 <span id="seaVal">0</span>m<input id="seaSlider" type="range" min="0" max="100" value="0"></div>
 <button id="uiToggleBtn" title="UI表示/非表示">🙈</button>
 <div id="credit" style="display:none; position:fixed; bottom:2px; left:8px; font-size:10px; color:rgba(255,255,255,0.65); z-index:30; pointer-events:all;"></div>
 <div id="mapOverlay">
@@ -950,7 +960,7 @@ const TREE_GREENS = MODE === 'marchen' ? [0x7be3a0, 0xffb0d0, 0xa0e8ff]
 // ======= 山の森(針葉樹)専用プール =======
 // 街の木(treeTrunkP/treeTopP)とは別枠。高標高スロープに円錐の針葉樹を敷き詰めて
 // 「森に覆われた山」を表現する。街路樹の上限を食い潰さないよう独立プールにする。
-const FOREST_MAX = 6000;
+const FOREST_MAX = 14000;
 const FOREST_GREENS = MODE === 'marchen' ? [0x6fce8a, 0x9be0a0, 0xffc0dc]
                     : MODE === 'space'   ? [0x66eeff, 0x88ffcc, 0xbb99ff]
                     : MODE === 'edo'     ? [0x3f5a2e, 0x4a6a33, 0x556b2f]
@@ -2344,9 +2354,10 @@ const WIDE_HALF_LAT = 0.13, WIDE_HALF_LON = 0.13;   // ≈ ±14km
 const WIDE_SEGS = 28, WIDE_SEGS1 = WIDE_SEGS + 1;
 const WIDE_W = 2 * WIDE_HALF_LON * SCALE * COS_LAT;
 const WIDE_D = 2 * WIDE_HALF_LAT * SCALE;
-const SEA_LEVEL_M = 1.5;      // これ以下の実標高は海とみなす
+let seaLevelM = 5;            // 海面の実標高(m)。スライダーで変更可(elevBase確定時に初期値を上書き)
+let wideRawM = null;          // 各ノードの実標高(m)。海面変更時に wideElev を再計算するため保持
 // wideElev は上方(遠景地形メッシュ定義の前)で宣言済み。flat [iz*WIDE_SEGS1+ix] = ゲーム高さ(海はSEA_Yより下へ沈める)
-let SEA_Y = 0;                // 実標高0m のゲーム高さ(loadElevations 後に確定)
+let SEA_Y = 0;                // 海面(seaLevelM)のゲーム高さ。SEA_Y = (seaLevelM - elevBase) * ELEV_SCALE
 
 function getWideTerrainY(x, z) {
   if (!wideElev) return 0;
@@ -2383,14 +2394,23 @@ async function loadWideTerrain() {
       if (i + 100 < pts.length) await new Promise(r => setTimeout(r, 1100));
     }
   } catch (e) { return; }
-  const arr = new Float32Array(pts.length);
-  for (let i = 0; i < pts.length; i++) {
-    const m = raw[i];
-    if (m == null || m <= SEA_LEVEL_M) arr[i] = SEA_Y - 12;               // 海: 海面プレーンの下へ沈める
-    else arr[i] = Math.max(SEA_Y + 2, (m - elevBase) * ELEV_SCALE);       // 陸: 詳細グリッドと同じ基準
+  wideRawM = raw;                        // 実標高(m)を保持 → 海面変更時に再分類できる
+  wideElev = new Float32Array(pts.length);
+  recomputeWideSea();                    // 現在の seaLevelM で陸/海を分類し、遠景メッシュを更新
+}
+
+// seaLevelM に基づいて海面高さ・遠景の陸/海分類を再計算する(スライダー操作・初回ロード共通)
+function recomputeWideSea() {
+  SEA_Y = (seaLevelM - elevBase) * ELEV_SCALE;
+  if (seaMesh) seaMesh.position.y = SEA_Y;
+  if (wideElev && wideRawM) {
+    for (let i = 0; i < wideRawM.length; i++) {
+      const m = wideRawM[i];
+      wideElev[i] = (m == null || m <= seaLevelM) ? SEA_Y - 12                   // 海: 海面プレーンの下へ沈める
+                  : Math.max(SEA_Y + 2, (m - elevBase) * ELEV_SCALE);            // 陸: 詳細グリッドと同じ基準
+    }
+    updateFarMesh(true); // 遠景メッシュを新しい海面で再構築
   }
-  wideElev = arr;
-  updateFarMesh(true); // 遠景メッシュを実地形で再構築
 }
 
 // 海面(実標高0m)の巨大プレーン。カメラ追従・霧免除で、南の地平の先に海が見える。
@@ -2398,7 +2418,13 @@ async function loadWideTerrain() {
 let seaMesh = null;
 function initDistantSea() {
   if (seaMesh) return;
-  SEA_Y = (0 - elevBase) * ELEV_SCALE;
+  // 海面標高の初期値: 保存値があれば優先。無ければ「詳細エリアの最低標高より少し下」に置く
+  // (= 海岸が街の近くまで来て、かつ街は水没しない安全な既定値)
+  let saved = NaN;
+  try { saved = parseFloat(localStorage.getItem('iseharaSeaLevel')); } catch (e) {}
+  seaLevelM = Number.isFinite(saved) ? saved : Math.max(0, Math.round(elevBase - 3));
+  seaLevelM = Math.max(0, Math.min(elevBase, seaLevelM));
+  SEA_Y = (seaLevelM - elevBase) * ELEV_SCALE;
   const c = document.createElement('canvas'); c.width = 128; c.height = 128;
   const g = c.getContext('2d');
   const base = MODE === 'space' ? '#0a2440' : MODE === 'edo' ? '#2f5a6a'
@@ -2423,6 +2449,28 @@ function initDistantSea() {
   seaMesh.frustumCulled = false;
   seaMesh.renderOrder = -1; // 空(-2)の後・地形の前。depthTestで陸には隠れる
   scene.add(seaMesh);
+  setupSeaSlider();
+}
+
+// 海面標高スライダーの初期化・配線(max = 詳細エリア最低標高 → 街は水没しない範囲で調整)
+function setupSeaSlider() {
+  const sl = document.getElementById('seaSlider');
+  const lab = document.getElementById('seaVal');
+  const box = document.getElementById('seaCtrl');
+  if (!sl || !lab) return;
+  sl.min = 0;
+  sl.max = Math.max(5, Math.floor(elevBase));
+  sl.value = Math.round(seaLevelM);
+  lab.textContent = Math.round(seaLevelM);
+  sl.addEventListener('input', () => {
+    seaLevelM = Math.max(0, Math.min(elevBase, +sl.value));
+    lab.textContent = Math.round(seaLevelM);
+    try { localStorage.setItem('iseharaSeaLevel', String(seaLevelM)); } catch (e) {}
+    recomputeWideSea();
+  });
+  // スマホ: スライダー操作がカメラ回転ハンドラに奪われないようにする
+  if (box) ['touchstart', 'touchmove', 'pointerdown'].forEach(ev =>
+    box.addEventListener(ev, e => e.stopPropagation(), { passive: false }));
 }
 
 async function loadOSM() {
@@ -2581,6 +2629,7 @@ async function loadOSM() {
     const sp = findSpawnNear(spw.x, spw.z); // 建物内なら最寄りの空き地点へ
     player.position.set(sp.x, 0, sp.z);
   }
+  seedInitialForest(); // 見えている丘に森を一括で敷く
   initialWorldLoaded = true; // ここからタイル取得を許可(標高は既に反映済み)
 }
 
@@ -2614,6 +2663,7 @@ function buildFallbackMap() {
     const sp2 = findSpawnNear(spw2.x, spw2.z);
     player.position.set(sp2.x, 0, sp2.z);
   }
+  seedInitialForest();
   initialWorldLoaded = true;
 }
 
@@ -3532,12 +3582,42 @@ function processChunkQueue() {
   generateChunk(c.x, c.z);
 }
 
-// ======= 山の森ストリーミング(高標高スロープに針葉樹を散布・プレイヤー追従) =======
-const FOREST_CELL = 90;       // セル辺(m)
-const FOREST_RADIUS = 7;      // ±7セル ≈ 630m
-const FOREST_MIN_Y = 26;      // このゲーム高さ以上を「山」とみなし森を配置(街の平地は対象外)
+// ======= 山の森(高標高スロープに針葉樹を散布) =======
+// 2系統: (A) 起動時に見えている詳細エリア全体の丘へ一括散布(スポーンから森が見える)、
+//         (B) プレイヤー追従ストリーミングで、詳細エリアの外(大山方面など)を歩くと森が続く。
+const FOREST_CELL = 90;       // ストリーミングのセル辺(m)
+const FOREST_RADIUS = 9;      // ±9セル ≈ 810m
+const FOREST_MIN_T = 0.42;    // 標高比 t=h/terrainMaxH がこれ以上を「山」とみなす(緑に着色する帯とほぼ一致)
 const forestCells = new Set();
 let _forestLastCX = Infinity, _forestLastCZ = Infinity;
+let initialForestDone = false;
+
+// 標高「比」で山を判定する(絶対高さだと、低地から高い街全体が森になってしまうため)
+function scatterForestCell(bx, bz, cell) {
+  const h = getGroundY(bx + cell / 2, bz + cell / 2);
+  const t = h / Math.max(1, terrainMaxH);
+  if (t < FOREST_MIN_T) return;
+  const dens = Math.min(20, 3 + Math.floor((t - FOREST_MIN_T) * 28)); // 高いほど密に
+  for (let i = 0; i < dens; i++) {
+    const x = bx + Math.random() * cell;
+    const z = bz + Math.random() * cell;
+    if (isOnRoad(x, z, 3, 3)) continue;
+    if (hasBuildingNearby(x, z, 7)) continue;
+    forestTree(x, z, 0.9 + Math.random() * 1.3);
+  }
+}
+
+// (A) 起動時: 詳細エリア(±WORLD/2)の丘へ一括で森を敷く。スポーン地点から見える北西の丘が森になる。
+function seedInitialForest() {
+  if (initialForestDone) return;
+  const step = 55;
+  for (let x = -WORLD_W/2; x < WORLD_W/2; x += step)
+    for (let z = -WORLD_D/2; z < WORLD_D/2; z += step)
+      scatterForestCell(x, z, step);
+  initialForestDone = true;
+}
+
+// (B) ストリーミング: プレイヤー周囲のセルに森を追加。詳細エリア内は(A)で敷き済みなので二重配置しない。
 function updateMountainForest() {
   if (!elevData) return;
   const pcx = Math.floor(player.position.x / FOREST_CELL);
@@ -3551,16 +3631,10 @@ function updateMountainForest() {
       if (forestCells.has(key)) continue;
       forestCells.add(key);
       const bx = gx * FOREST_CELL, bz = gz * FOREST_CELL;
-      const h = getGroundY(bx + FOREST_CELL / 2, bz + FOREST_CELL / 2);
-      if (h < FOREST_MIN_Y) continue; // 平地・低地は森にしない
-      const dens = Math.min(16, 3 + Math.floor((h - FOREST_MIN_Y) / 10)); // 高いほど密に
-      for (let i = 0; i < dens; i++) {
-        const x = bx + Math.random() * FOREST_CELL;
-        const z = bz + Math.random() * FOREST_CELL;
-        if (isOnRoad(x, z, 3, 3)) continue;
-        if (hasBuildingNearby(x, z, 8)) continue;
-        forestTree(x, z, 0.9 + Math.random() * 1.2);
-      }
+      // 詳細エリア内は起動時の一括散布に任せる(二重配置防止)
+      const ccx = bx + FOREST_CELL / 2, ccz = bz + FOREST_CELL / 2;
+      if (initialForestDone && ccx > -WORLD_W/2 && ccx < WORLD_W/2 && ccz > -WORLD_D/2 && ccz < WORLD_D/2) continue;
+      scatterForestCell(bx, bz, FOREST_CELL);
     }
 }
 
