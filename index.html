@@ -961,23 +961,28 @@ const TREE_GREENS = MODE === 'marchen' ? [0x7be3a0, 0xffb0d0, 0xa0e8ff]
 // 街の木(treeTrunkP/treeTopP)とは別枠。高標高スロープに円錐の針葉樹を敷き詰めて
 // 「森に覆われた山」を表現する。街路樹の上限を食い潰さないよう独立プールにする。
 const FOREST_MAX = 14000;
-const FOREST_GREENS = MODE === 'marchen' ? [0x6fce8a, 0x9be0a0, 0xffc0dc]
+const FOREST_GREENS = MODE === 'marchen' ? [0x74d98f, 0x9be0a0, 0xffc0dc]
                     : MODE === 'space'   ? [0x66eeff, 0x88ffcc, 0xbb99ff]
-                    : MODE === 'edo'     ? [0x3f5a2e, 0x4a6a33, 0x556b2f]
-                    : MODE === 'meiji'   ? [0x4a6a33, 0x3f5a2e, 0x5a7a3a]
-                    : [0x244a24, 0x2f5c2c, 0x356a30]; // 現実: 深い針葉樹の緑
+                    : MODE === 'edo'     ? [0x4f7a3a, 0x5c8a40, 0x668f45]
+                    : MODE === 'meiji'   ? [0x5a8a3a, 0x4f7a33, 0x6a9a45]
+                    : [0x347f34, 0x3f9a3a, 0x2f7a2f]; // 現実: はっきりした森の緑
 const forestTrunkP = makePool(new THREE.CylinderGeometry(0.16, 0.26, 2.0, 5),
   new THREE.MeshLambertMaterial({ color: MODE === 'space' ? 0x2a3a4a : 0x4a3524 }), FOREST_MAX);
+// 樹冠: 街路樹(treeTopP)と同じ「球+白Lambert+インスタンス色」の実績ある構成にする。
+// (以前は円錐にしていたが樹冠が出ず幹だけになっていたため、確実に描ける球へ戻す)
 const forestTopP = makePool(
-  MODE === 'space' ? new THREE.ConeGeometry(1.0, 3.4, 6) : new THREE.ConeGeometry(1.1, 3.4, 6),
-  MODE === 'space' ? new THREE.MeshLambertMaterial({ color: 0xffffff, transparent: true, opacity: 0.85, emissive: 0x224466 })
-                   : new THREE.MeshLambertMaterial({ color: 0xffffff }), FOREST_MAX);
+  MODE === 'space' ? new THREE.ConeGeometry(1.1, 3.2, 6) : new THREE.SphereGeometry(1.5, 6, 5),
+  new THREE.MeshLambertMaterial({ color: 0xffffff }), FOREST_MAX);
 function forestTree(x, z, s) {
   const gy = getGroundY(x, z);
-  if (MODE !== 'space') poolAdd(forestTrunkP, x, gy + 1.0 * s, z, 0, s, s, s);
-  poolAdd(forestTopP, x, gy + (MODE === 'space' ? 1.7 : 3.0) * s, z, Math.random() * 3,
-          s, s * (1.05 + Math.random() * 0.5), s,
-          FOREST_GREENS[(Math.random() * FOREST_GREENS.length) | 0]);
+  const col = FOREST_GREENS[(Math.random() * FOREST_GREENS.length) | 0];
+  if (MODE === 'space') { // クリスタル(幹なし)
+    poolAdd(forestTopP, x, gy + 1.7 * s, z, Math.random() * 3, s, s * 1.3, s, col);
+    return;
+  }
+  poolAdd(forestTrunkP, x, gy + 1.0 * s, z, 0, s, s, s);          // 幹: 根元を gy に
+  poolAdd(forestTopP,  x, gy + 2.6 * s, z, Math.random() * 3,     // 樹冠: 幹の上に載る球
+          s * 1.25, s * (1.15 + Math.random() * 0.4), s * 1.25, col);
 }
 // 道路小物のモード別ふるまい
 const PROP_WIRES   = MODE === 'real';                 // 電線は現実のみ
@@ -2423,7 +2428,7 @@ function initDistantSea() {
   let saved = NaN;
   try { saved = parseFloat(localStorage.getItem('iseharaSeaLevel')); } catch (e) {}
   seaLevelM = Number.isFinite(saved) ? saved : Math.max(0, Math.round(elevBase - 3));
-  seaLevelM = Math.max(0, Math.min(elevBase, seaLevelM));
+  seaLevelM = Math.max(0, seaLevelM);
   SEA_Y = (seaLevelM - elevBase) * ELEV_SCALE;
   const c = document.createElement('canvas'); c.width = 128; c.height = 128;
   const g = c.getContext('2d');
@@ -2458,12 +2463,15 @@ function setupSeaSlider() {
   const lab = document.getElementById('seaVal');
   const box = document.getElementById('seaCtrl');
   if (!sl || !lab) return;
+  // 上限は最高地点の実標高まで許可 → スライダーを上げると低地から順に水没していくのが見える。
+  // (以前は上限=最低標高で、水面が視界に入らず「動かしても変化しない」ように見えていた)
+  const maxSea = Math.round(elevBase + terrainMaxH / ELEV_SCALE) + 5;
   sl.min = 0;
-  sl.max = Math.max(5, Math.floor(elevBase));
+  sl.max = Math.max(20, maxSea);
   sl.value = Math.round(seaLevelM);
   lab.textContent = Math.round(seaLevelM);
   sl.addEventListener('input', () => {
-    seaLevelM = Math.max(0, Math.min(elevBase, +sl.value));
+    seaLevelM = Math.max(0, +sl.value);
     lab.textContent = Math.round(seaLevelM);
     try { localStorage.setItem('iseharaSeaLevel', String(seaLevelM)); } catch (e) {}
     recomputeWideSea();
