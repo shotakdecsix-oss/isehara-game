@@ -1659,23 +1659,32 @@ function makeRoadGeo(x1, z1, x2, z2, width, yOffset) {
   const px = -nz, pz = nx;        // left perpendicular
   const hw = width / 2;
   const segs = Math.max(1, Math.round(len)); // 1 vertex per meter
+  // 横断方向の分割数。以前は左右端の2点だけで平面を張っていたため、幅広の道路
+  // (峠道など)では中央が地形(バイリニア面)より低くなり、地形に埋まって見えることがあった。
+  // 幅3mあたり1列を目安に中間点もサンプリングし、道の途中で地形に飲み込まれないようにする。
+  const cols = Math.max(2, Math.min(5, Math.ceil(width / 3) + 1));
 
   const verts = [], idxs = [], uvs = [];
   for (let i = 0; i <= segs; i++) {
     const t = i / segs;
     const cx = x1 + dx*t, cz = z1 + dz*t;
-    // 左右の端で個別に地形高さをサンプリング。
+    // 各横断位置ごとに個別に地形高さをサンプリング。
     // (以前は中心線の高さを両端に使っていたため、道路を横切る斜面では
     //  山側の端が地形に埋まって途切れて見えた)
-    const lx = cx + px*hw, lz = cz + pz*hw;
-    const rx = cx - px*hw, rz = cz - pz*hw;
-    verts.push(lx, getGroundY(lx, lz) + yOffset, lz); // left
-    verts.push(rx, getGroundY(rx, rz) + yOffset, rz); // right
-    // u=横断方向0..1 / v=道なり距離[m](テクスチャ側のrepeatで車線・枕木の周期に変換)
-    uvs.push(0, t * len, 1, t * len);
+    for (let c = 0; c < cols; c++) {
+      const u = c / (cols - 1); // 0=left .. 1=right
+      const off = hw - u * width;
+      const vx = cx + px*off, vz = cz + pz*off;
+      verts.push(vx, getGroundY(vx, vz) + yOffset, vz);
+      // u=横断方向0..1 / v=道なり距離[m](テクスチャ側のrepeatで車線・枕木の周期に変換)
+      uvs.push(u, t * len);
+    }
     if (i < segs) {
-      const b = i*2;
-      idxs.push(b, b+1, b+2, b+1, b+3, b+2);
+      const b0 = i * cols, b1 = (i + 1) * cols;
+      for (let c = 0; c < cols - 1; c++) {
+        const a = b0 + c, bIdx = b0 + c + 1, cc = b1 + c, d = b1 + c + 1;
+        idxs.push(a, bIdx, cc, bIdx, d, cc);
+      }
     }
   }
   const geo = new THREE.BufferGeometry();
@@ -2027,6 +2036,7 @@ function scatterTreesIn(poly, sqmPerTree, cap) {
     const x = poly.minX + Math.random() * (poly.maxX - poly.minX);
     const z = poly.minZ + Math.random() * (poly.maxZ - poly.minZ);
     if (!pointInPolygon(x, z, poly.pts)) continue;
+    if (isOnRoad(x, z, 2.5, 2.5)) continue; // 公園・森を横切る道路の上に木が生えないように
     addTree(x, z, 0.7 + Math.random() * 0.9);
   }
 }
@@ -2062,8 +2072,9 @@ async function loadMeijiMesh(lat, lon) {
       meijiCells.set(Math.round(p.x / 100) + ',' + Math.round(p.z / 100), code);
       // 森林・竹は読み込み時に低密度で木を散布(恒久インスタンス。プール上限で頭打ち)
       if ((code === 4 || code === 11) && Math.random() < 0.4) {
-        addTree(p.x + (Math.random() - 0.5) * 80, p.z + (Math.random() - 0.5) * 80,
-                code === 11 ? 0.55 : 0.8 + Math.random() * 0.8);
+        const tx = p.x + (Math.random() - 0.5) * 80, tz = p.z + (Math.random() - 0.5) * 80;
+        if (!isOnRoad(tx, tz, 2.5, 2.5)) // 街道の上に木が生えないように
+          addTree(tx, tz, code === 11 ? 0.55 : 0.8 + Math.random() * 0.8);
       }
     }
   } catch (e) { meijiMeshLoaded.delete(m2); } // ネットワーク失敗は再試行可能に
@@ -2424,17 +2435,20 @@ async function loadElevations() {
   const elevs = new Array(latlons.length).fill(0);
   let ok = true;
   try {
-    for (let i = 0; i < latlons.length; i += 100) {
-      const batch = latlons.slice(i, i + 100);
+    // バッチを並列発行する。opentopodataの1req/秒レート制限は server/server.js の
+    // プロキシ側(scheduleUpstream)が直列キューで既に守っているため、クライアント側で
+    // さらに1.1秒ずつ待つのは二重の待機になっていた(初回読み込みが不必要に遅い主因)。
+    // プロキシ経由でない直叩き運用は想定していない(README/DEPLOY.md参照)。
+    const batches = [];
+    for (let i = 0; i < latlons.length; i += 100) batches.push(latlons.slice(i, i + 100));
+    const results = await Promise.all(batches.map(batch => {
       const locStr = batch.map(ll => `${ll.lat.toFixed(6)},${ll.lon.toFixed(6)}`).join('|');
-      const res = await fetch(`https://api.opentopodata.org/v1/srtm30m?locations=${encodeURIComponent(locStr)}`);
-      const json = await res.json();
-      if (json.results) json.results.forEach((r, j) => { elevs[i+j] = r.elevation || 0; });
-      else { ok = false; break; } // 429等 — 以前はここで平坦のままreturnしていた
-      // opentopodata公式レート制限は1リクエスト/秒。以前の300msでは2発目以降が429で
-      // 必ず失敗し、地形が常に平坦になっていた
-      if (i + 100 < latlons.length) await new Promise(r => setTimeout(r, 1100));
-    }
+      return fetch(`https://api.opentopodata.org/v1/srtm30m?locations=${encodeURIComponent(locStr)}`).then(r => r.json());
+    }));
+    results.forEach((json, bi) => {
+      if (json && json.results) json.results.forEach((r, j) => { elevs[bi*100 + j] = r.elevation || 0; });
+      else ok = false; // 429等 — 失敗分は0のままだが、ok=falseで下のprocedural地形に総入れ替えされる
+    });
   } catch(e) { ok = false; }
 
   if (!ok) {
@@ -2501,14 +2515,17 @@ async function loadWideTerrain(centerX = 0, centerZ = 0) {
     }
   const raw = new Array(pts.length).fill(null);
   try {
-    for (let i = 0; i < pts.length; i += 100) {
-      const batch = pts.slice(i, i + 100);
+    // loadElevations と同じ理由でバッチを並列発行(プロキシ側で既にレート制限・キャッシュ済み)
+    const batches = [];
+    for (let i = 0; i < pts.length; i += 100) batches.push(pts.slice(i, i + 100));
+    const results = await Promise.all(batches.map(batch => {
       const loc = batch.map(ll => `${ll.lat.toFixed(6)},${ll.lon.toFixed(6)}`).join('|');
-      const res = await fetch(`https://api.opentopodata.org/v1/srtm30m?locations=${encodeURIComponent(loc)}`);
-      const j = await res.json();
-      if (!j.results) { wideLoading = false; return; } // 失敗時は現状維持(安全なフォールバック)
-      j.results.forEach((r, k) => { raw[i + k] = r.elevation; });
-      if (i + 100 < pts.length) await new Promise(r => setTimeout(r, 1100));
+      return fetch(`https://api.opentopodata.org/v1/srtm30m?locations=${encodeURIComponent(loc)}`).then(r => r.json());
+    }));
+    for (let bi = 0; bi < results.length; bi++) {
+      const j = results[bi];
+      if (!j || !j.results) { wideLoading = false; return; } // 失敗時は現状維持(安全なフォールバック)
+      j.results.forEach((r, k) => { raw[bi*100 + k] = r.elevation; });
     }
   } catch (e) { wideLoading = false; return; }
   const arr = new Float32Array(pts.length);
@@ -2602,27 +2619,35 @@ function setupSeaSlider() {
     box.addEventListener(ev, e => e.stopPropagation(), { passive: false }));
 }
 
-async function loadOSM() {
+// OSM(Overpass)データの取得だけを行う。地形(標高)データへの依存が無いので、
+// loadElevations() と並行に開始できる(以前は awaitloadElevations() の後に
+// 直列で呼んでおり、地形取得+OSM取得の待ち時間がそのまま合算されていた)。
+async function fetchOSMData() {
   const bb = `${OSM_BOUNDS.minLat},${OSM_BOUNDS.minLon},${OSM_BOUNDS.maxLat},${OSM_BOUNDS.maxLon}`;
   const query = `[out:json][timeout:40];(way["highway"](${bb});way["building"](${bb});way["landuse"~"residential|commercial|industrial|retail|mixed_use|farmland|orchard|meadow|allotments|forest"](${bb});way["leisure"~"park|garden|playground"](${bb});way["natural"~"water|wood"](${bb});way["waterway"~"river|stream|canal|riverbank"](${bb});relation["natural"="water"](${bb});relation["waterway"="riverbank"](${bb});way["railway"="rail"](${bb});node["railway"="station"](${bb});node["railway"="halt"](${bb});node["public_transport"="station"](${bb}););out geom;`;
   const url = 'https://overpass-api.de/api/interpreter?data=' + encodeURIComponent(query);
-
-  let data = null;
   try {
     statusEl.textContent = '🗺 伊勢原マップ取得中... (最大30秒)';
     const res = await Promise.race([
       fetch(url).then(r=>r.json()),
       new Promise((_,rej)=>setTimeout(()=>rej(new Error('timeout')), 32000))
     ]);
-    data = res;
-    statusEl.textContent = `✅ OSMデータ取得完了 (${data.elements.length} 要素)`;
+    return res;
   } catch(e) {
+    return null;
+  }
+}
+
+// data を省略した場合は自分で fetchOSMData() する(従来どおりの単体呼び出しにも対応)
+async function loadOSM(preFetchedData) {
+  const data = preFetchedData !== undefined ? preFetchedData : await fetchOSMData();
+
+  if (!data || !data.elements) {
     statusEl.textContent = '⚠️ OSM取得失敗 - フォールバックマップ使用';
     buildFallbackMap();
     return;
   }
-
-  if (!data || !data.elements) { buildFallbackMap(); return; }
+  statusEl.textContent = `✅ OSMデータ取得完了 (${data.elements.length} 要素)`;
 
   const nodeMap = {};
   data.elements.forEach(el => {
@@ -2817,9 +2842,12 @@ function getStartLocation() {
   // モード切替リロード(江戸↔現実など)では切替前の位置に戻す。その時は現在地ジャンプしない。
   let isModeSwitch = false;
   try { isModeSwitch = !!localStorage.getItem('iseharaResumePos'); } catch (e) {}
+  // OSM取得は地形データにもmeiji土地利用データにも依存しないので、それらの取得と
+  // 並行して先に投げておく(以前は地形→OSMの完全直列で、両方の待ち時間がそのまま合算されていた)
+  const osmDataP = fetchOSMData();
   await loadElevations();
   if (IS_MEIJI) await loadMeijiLanduse();
-  await loadOSM(); // モード切替時はここで切替前の位置に復帰する
+  await loadOSM(await osmDataP); // モード切替時はここで切替前の位置に復帰する
   // 通常起動のみ初期位置へ移動(現在地、取れなければ東京駅)。伊勢原の詳細地形は座標基準として残し、
   // 現在地の地形は遠景グリッド(約1km間隔)+ OSMタイルで表示する。
   const loc = await startLocP;
@@ -3654,7 +3682,8 @@ function generateMeijiCells(x0, z0, x1, z1, inAvoid) {
         }
         if (Math.random() < 0.04) addFireTower(cx + (Math.random() - 0.5) * 60, cz + (Math.random() - 0.5) * 60);
       } else if (code === 3 && Math.random() < 0.5) {
-        addTree(cx + (Math.random() - 0.5) * 70, cz + (Math.random() - 0.5) * 70, 0.4); // 桑・茶の低木
+        const tx = cx + (Math.random() - 0.5) * 70, tz = cz + (Math.random() - 0.5) * 70;
+        if (!isOnRoad(tx, tz, 2.5, 2.5)) addTree(tx, tz, 0.4); // 桑・茶の低木(街道の上には生やさない)
       }
     }
   }
