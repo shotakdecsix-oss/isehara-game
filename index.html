@@ -3322,7 +3322,10 @@ function floorHeightAt(x, z, fromY) {
 // ======= TILE-BASED DYNAMIC OSM FETCHING =======
 // Each tile is 700m x 700m. When the player enters a new tile, fetch its OSM data.
 const OSM_TILE_M = 700;
-const fetchedOSMTiles = new Set();
+const fetchedOSMTiles = new Set();   // キュー投入済み(取得中 or 取得完了)のタイル
+const loadedOSMTiles = new Set();    // 実際に処理が完了した(道路が確定した)タイル。
+                                      // 「地形→道路→建物→木」の順を守るため、チャンクの
+                                      // 建物生成はこれで判定してカバー範囲のタイルを待つ。
 const osmTileQueue = [];
 let osmTileFetching = false;
 const osmTileFailCount = new Map(); // タイルごとの失敗回数(3回まで再試行)
@@ -3349,8 +3352,11 @@ let pendingBuildingIdx = 0;
   for (let tx = Math.floor(x0/OSM_TILE_M); tx <= Math.floor(x1/OSM_TILE_M); tx++)
     for (let tz = Math.floor(z0/OSM_TILE_M); tz <= Math.floor(z1/OSM_TILE_M); tz++) {
       if (tx*OSM_TILE_M >= x0 && (tx+1)*OSM_TILE_M <= x1 &&
-          tz*OSM_TILE_M >= z0 && (tz+1)*OSM_TILE_M <= z1)
-        fetchedOSMTiles.add(`${tx},${tz}`);
+          tz*OSM_TILE_M >= z0 && (tz+1)*OSM_TILE_M <= z1) {
+        const k = `${tx},${tz}`;
+        fetchedOSMTiles.add(k);
+        loadedOSMTiles.add(k); // 初期loadOSM()で道路も既に確定済み
+      }
     }
 })();
 
@@ -3459,6 +3465,7 @@ async function processOSMTileQueue() {
     if (!data || !data.elements) throw new Error('no elements');
     processTileData(data);
     osmTileFailCount.delete(key);
+    loadedOSMTiles.add(key); // このタイルの道路が確定 → 建物生成待ちのチャンクを解放してよい
   } catch(e) {
     // 以前は失敗タイルが fetchedOSMTiles に残ったまま二度と再試行されず、
     // レート制限(429)等で永久に歯抜けになっていた → 3回まで再試行
@@ -3466,6 +3473,7 @@ async function processOSMTileQueue() {
     const n = (osmTileFailCount.get(key) || 0) + 1;
     osmTileFailCount.set(key, n);
     if (n < 4) fetchedOSMTiles.delete(key); // checkOSMTiles が再度キューに積む
+    else loadedOSMTiles.add(key); // 3回失敗して諦める場合も「確定」扱いにし、建物生成が永久に止まらないようにする
   }
   await new Promise(r => setTimeout(r, failed ? 6000 : 1500)); // 失敗時は長く待ってレート制限回復
   osmTileFetching = false;
@@ -3762,6 +3770,21 @@ function updateChunks() {
   if (removedAny) rebuildCollGrid();
 }
 
+// このチャンクの範囲を覆うOSMタイルが全て「道路確定済み」かどうか。
+// (地形→道路→建物→木の順を守るためのゲート。以前はチャンクの建物生成が
+//  minimapRoads にその時点で乗っている道路だけを見て進んでしまい、後から
+//  非同期でタイルの道路データが届くと、既に建てた建物に道路が遮られていた)
+function chunkTilesReady(chunkX, chunkZ) {
+  const x0 = chunkX * CHUNK_SIZE, z0 = chunkZ * CHUNK_SIZE;
+  const x1 = x0 + CHUNK_SIZE, z1 = z0 + CHUNK_SIZE;
+  const txs = [Math.floor(x0 / OSM_TILE_M), Math.floor(x1 / OSM_TILE_M)];
+  const tzs = [Math.floor(z0 / OSM_TILE_M), Math.floor(z1 / OSM_TILE_M)];
+  for (const tx of txs) for (const tz of tzs) {
+    if (!loadedOSMTiles.has(`${tx},${tz}`)) return false;
+  }
+  return true;
+}
+
 // 1フレームに1チャンクだけ生成するフレーム分割処理
 function processChunkQueue() {
   if (chunkGenQueue.length === 0) return;
@@ -3771,6 +3794,12 @@ function processChunkQueue() {
   // キュー待ちの間に遠ざかったチャンクは破棄(再訪時に再キューされる)
   if (Math.abs(c.x - ccx) > CHUNK_RADIUS + 1 || Math.abs(c.z - ccz) > CHUNK_RADIUS + 1) {
     loadedChunks.delete(c.key);
+    return;
+  }
+  // カバーするタイルの道路データがまだ届いていなければ、建物を生成せず後回しにする
+  // (キュー末尾へ回し、他の準備済みチャンクを先に処理する)
+  if (!chunkTilesReady(c.x, c.z)) {
+    chunkGenQueue.push(c);
     return;
   }
   generateChunk(c.x, c.z);
