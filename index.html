@@ -533,6 +533,47 @@ function roadGridAdd(r) {
 }
 // minimapRoads.push の共通化: 記録と同時に空間グリッドへ登録
 function addRoadRecord(r) { minimapRoads.push(r); roadGridAdd(r); }
+// 矩形範囲にかかる可能性のある道路だけを空間ハッシュから拾う(minimapRoads全件走査を避ける)
+function queryRoadGrid(x0, x1, z0, z1) {
+  const gx0 = Math.floor(x0 / ROAD_CELL), gx1 = Math.floor(x1 / ROAD_CELL);
+  const gz0 = Math.floor(z0 / ROAD_CELL), gz1 = Math.floor(z1 / ROAD_CELL);
+  const seen = new Set(), out = [];
+  for (let gx = gx0; gx <= gx1; gx++) for (let gz = gz0; gz <= gz1; gz++) {
+    const arr = roadGrid.get(gx + ',' + gz);
+    if (!arr) continue;
+    for (const r of arr) { if (!seen.has(r)) { seen.add(r); out.push(r); } }
+  }
+  return out;
+}
+
+// ======= ポリゴン(避けエリア・landuse・水/公園/田畑メッシュ)用の汎用空間ハッシュ =======
+// 【重要】これらは取得したタイル分だけ増え続けて一切減らないため、以前は
+// generateChunk() や rebuildAreaPolysInBounds() が毎回配列を全件線形走査(filter)して
+// いた。探索距離が伸びるほど1回あたりのコストが線形に悪化し、長時間プレイで
+// 「移動を続けると徐々に重くなり最終的に落ちる」症状の主因の一つになっていた。
+// ポリゴンは道路よりずっと広い範囲を覆うことがあるため、道路用より粗いセルを使う。
+const POLY_CELL = 200;
+function polyGridAdd(grid, entry) {
+  const gx0 = Math.floor(entry.minX / POLY_CELL), gx1 = Math.floor(entry.maxX / POLY_CELL);
+  const gz0 = Math.floor(entry.minZ / POLY_CELL), gz1 = Math.floor(entry.maxZ / POLY_CELL);
+  for (let gx = gx0; gx <= gx1; gx++) for (let gz = gz0; gz <= gz1; gz++) {
+    const k = gx + ',' + gz;
+    let arr = grid.get(k);
+    if (!arr) { arr = []; grid.set(k, arr); }
+    arr.push(entry);
+  }
+}
+function queryPolyGrid(grid, x0, x1, z0, z1) {
+  const gx0 = Math.floor(x0 / POLY_CELL), gx1 = Math.floor(x1 / POLY_CELL);
+  const gz0 = Math.floor(z0 / POLY_CELL), gz1 = Math.floor(z1 / POLY_CELL);
+  const seen = new Set(), out = [];
+  for (let gx = gx0; gx <= gx1; gx++) for (let gz = gz0; gz <= gz1; gz++) {
+    const arr = grid.get(gx + ',' + gz);
+    if (!arr) continue;
+    for (const e of arr) { if (!seen.has(e)) { seen.add(e); out.push(e); } }
+  }
+  return out;
+}
 
 // 道路メッシュを、現在(呼び出し時点)の getGroundY に合わせて作り直す。
 // 以前は道路メッシュを最初に生成した瞬間の地形高さで永久に固定していたため、
@@ -688,6 +729,7 @@ function unloadFarBuildings() {
 
 let placedBuildings = [];  // {x,z,r,ck} for landuse de-duplication
 const landusePolygons = []; // {pts, lu, minX, maxX, minZ, maxZ} — stored during loadOSM for dynamic chunk generation
+const landuseGrid = new Map(); // polyGridAdd/queryPolyGridで使う空間ハッシュ(全件走査を避ける)
 const loadedChunks = new Set(); // "cx,cz" string keys of already-generated chunks
 const chunkMeshes = new Map();  // "cx,cz" → [THREE.Mesh, ...] for unloading
 const CHUNK_SIZE = 120;  // meters per chunk side
@@ -1293,17 +1335,30 @@ function addTree(x, z, s) {
           s * (round ? 1.3 : 1), s * (round ? 0.95 : 0.9 + Math.random() * 0.5), s * (round ? 1.3 : 1));
 }
 
+// 全道路種別中の最大幅(河川60m。waterwayWidthのMath.min(60,...)参照)の半分。
+// isOnRoadで「この距離まで探せば取りこぼしがない」近傍セル数を見積もるのに使う。
+const MAX_ROAD_HALF_W = 30;
 // Returns true if the rectangle (cx,cz,bw,bd) overlaps any road segment
+// 【重要】以前はminimapRoads(取得済み全道路。増え続けて減らない)を毎回線形走査していたため、
+// 探索が進むほど呼び出しコストが際限なく重くなっていた(長時間プレイでの重量化の主因の一つ)。
+// roadGrid(空間ハッシュ)を使い、実際に該当しうる近傍セルだけを見るように変更する。
 function isOnRoad(cx, cz, bw, bd) {
   const halfDiag = Math.sqrt(bw*bw + bd*bd) / 2;
-  for (const r of minimapRoads) {
-    const dx = r.x2-r.x1, dz = r.z2-r.z1;
-    const len2 = dx*dx + dz*dz;
-    if (len2 < 0.01) continue;
-    const t = Math.max(0, Math.min(1, ((cx-r.x1)*dx + (cz-r.z1)*dz) / len2));
-    const nx = r.x1 + t*dx - cx, nz = r.z1 + t*dz - cz;
-    const dist = Math.sqrt(nx*nx + nz*nz);
-    if (dist < (r.rw||5)/2 + halfDiag + 1) return true; // 1m margin
+  const searchR = MAX_ROAD_HALF_W + halfDiag + 1;
+  const cellR = Math.max(1, Math.ceil(searchR / ROAD_CELL)) + 1; // +1はセル境界のずれに対する安全マージン
+  const gx = Math.floor(cx / ROAD_CELL), gz = Math.floor(cz / ROAD_CELL);
+  for (let dx = -cellR; dx <= cellR; dx++) for (let dz = -cellR; dz <= cellR; dz++) {
+    const arr = roadGrid.get((gx + dx) + ',' + (gz + dz));
+    if (!arr) continue;
+    for (const r of arr) {
+      const rdx = r.x2-r.x1, rdz = r.z2-r.z1;
+      const len2 = rdx*rdx + rdz*rdz;
+      if (len2 < 0.01) continue;
+      const t = Math.max(0, Math.min(1, ((cx-r.x1)*rdx + (cz-r.z1)*rdz) / len2));
+      const nx = r.x1 + t*rdx - cx, nz = r.z1 + t*rdz - cz;
+      const dist = Math.sqrt(nx*nx + nz*nz);
+      if (dist < (r.rw||5)/2 + halfDiag + 1) return true; // 1m margin
+    }
   }
   return false;
 }
@@ -2224,11 +2279,13 @@ function latLonToXZ(lat, lon) {
 
 // ======= 面フィーチャ(公園・水域・田畑・森) =======
 const avoidPolygons = []; // 手続き生成の建物を建ててはいけない領域
+const avoidGrid = new Map(); // polyGridAdd/queryPolyGridで使う空間ハッシュ(全件走査を避ける)
 const areaPolyBudget = { park: 80, water: 80, farm: 250 }; // 面メッシュのドローコール予算
 const lawnMat  = new THREE.MeshLambertMaterial({ color: MODE_CONF.lawn, side: THREE.DoubleSide });
 // リボン(ROAD_MAT.water)と同じMeshBasicにして、重なっても境目が見えないようにする
 const waterAreaMat = new THREE.MeshBasicMaterial({ color: MODE_CONF.water, side: THREE.DoubleSide });
 const minimapWaterPolys = []; // ミニマップに描く実形状水面 {pts,minX,maxX,minZ,maxZ}
+const minimapWaterGrid = new Map(); // polyGridAdd/queryPolyGridで使う空間ハッシュ(全件走査を避ける)
 // 田畑: あぜ縞のcanvasテクスチャ(uv=世界座標なので repeat で約9m周期の縞になる)
 const farmMat = (() => {
   const c = document.createElement('canvas'); c.width = 32; c.height = 32;
@@ -2249,6 +2306,7 @@ const farmMat = (() => {
 // 水域・公園・田畑ポリゴンのメッシュ一覧。NEAR高解像度地形が更新されたとき、
 // 範囲にかかるものだけ高さを再スナップする(浮き/埋まり対策。道路と同じ考え方)。
 const areaPolyMeshes = [];
+const areaPolyGrid = new Map(); // polyGridAdd/queryPolyGridで使う空間ハッシュ(全件走査を避ける)
 function rebuildAreaPolyMesh(entry) {
   const pos = entry.mesh.geometry.attributes.position;
   for (let i = 0; i < pos.count; i++) {
@@ -2259,8 +2317,12 @@ function rebuildAreaPolyMesh(entry) {
   entry.mesh.geometry.computeVertexNormals();
   entry.mesh.geometry.computeBoundingSphere();
 }
+// 【重要】以前はareaPolyMeshes(取得済み全件。増え続けて減らない)を毎回全件走査していた。
+// NEAR地形の再取得・チャンク生成のたびに呼ばれる頻出パスなので、探索が進むほど
+// コストが際限なく悪化していた(長時間プレイでの重量化の主因の一つ)。空間ハッシュで近傍だけ拾う。
 function rebuildAreaPolysInBounds(x0, x1, z0, z1) {
-  for (const e of areaPolyMeshes) {
+  for (const e of queryPolyGrid(areaPolyGrid, x0, x1, z0, z1)) {
+    // グリッドはセル単位(粗い)なので、無駄な再構築を避けるため最後に正確なbboxで絞る
     if (e.maxX < x0 || e.minX > x1 || e.maxZ < z0 || e.minZ > z1) continue;
     rebuildAreaPolyMesh(e);
   }
@@ -2289,7 +2351,9 @@ function buildAreaPoly(pts, mat, yOff, holes) {
   scene.add(mesh);
   let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
   for (const p of pts) { minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minZ = Math.min(minZ, p.z); maxZ = Math.max(maxZ, p.z); }
-  areaPolyMeshes.push({ mesh, yOff, minX, maxX, minZ, maxZ });
+  const entry = { mesh, yOff, minX, maxX, minZ, maxZ };
+  areaPolyMeshes.push(entry);
+  polyGridAdd(areaPolyGrid, entry);
 }
 
 function scatterTreesIn(poly, sqmPerTree, cap) {
@@ -2420,6 +2484,7 @@ function processWaterRelation(el) {
     if (pts.length < 4) continue;
     const poly = { pts, minX, maxX, minZ, maxZ };
     avoidPolygons.push(poly); // 水面内には建物を生成しない
+    polyGridAdd(avoidGrid, poly);
     if (areaPolyBudget.water-- > 0) {
       // このouterのbbox内にある中州(inner)を穴として追加
       const holes = innerRings
@@ -2428,6 +2493,7 @@ function processWaterRelation(el) {
                 hp[0].x >= minX && hp[0].x <= maxX && hp[0].z >= minZ && hp[0].z <= maxZ);
       buildAreaPoly(pts, waterAreaMat, 0.15, holes);
       minimapWaterPolys.push(poly);
+      polyGridAdd(minimapWaterGrid, poly);
     }
   }
 }
@@ -2462,6 +2528,7 @@ function handleAreaFeature(el) {
   pts.forEach(p => { minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minZ = Math.min(minZ, p.z); maxZ = Math.max(maxZ, p.z); });
   const poly = { pts, minX, maxX, minZ, maxZ };
   avoidPolygons.push(poly);
+  polyGridAdd(avoidGrid, poly);
   // 巨大ポリゴンの面メッシュは張らない(頂点間で地形を突き抜けるため)。木は個別に接地するのでOK
   // また面メッシュ=1ドローコールなので種類ごとに総数予算を設ける(超過分は回避領域としてのみ機能)
   const span = Math.max(maxX - minX, maxZ - minZ);
@@ -2483,7 +2550,9 @@ function handleAreaFeature(el) {
     if (span < 3000 && areaPolyBudget.water-- > 0) {
       const tp = thinPts(pts, span > 400 ? 10 : 0);
       buildAreaPoly(tp, waterAreaMat, 0.15);
-      minimapWaterPolys.push({ pts: tp, minX, maxX, minZ, maxZ });
+      const _wpEntry = { pts: tp, minX, maxX, minZ, maxZ };
+      minimapWaterPolys.push(_wpEntry);
+      polyGridAdd(minimapWaterGrid, _wpEntry);
     }
   } else if (isFarm) {
     if (span >= 15 && span < 500 && areaPolyBudget.farm-- > 0) buildAreaPoly(pts, farmMat, 0.1);
@@ -3149,7 +3218,9 @@ async function loadOSM(preFetchedData) {
     const pts = el.geometry.map(g => latLonToXZ(g.lat, g.lon));
     let minX=Infinity, maxX=-Infinity, minZ=Infinity, maxZ=-Infinity;
     pts.forEach(p => { minX=Math.min(minX,p.x); maxX=Math.max(maxX,p.x); minZ=Math.min(minZ,p.z); maxZ=Math.max(maxZ,p.z); });
-    landusePolygons.push({ pts, lu, minX, maxX, minZ, maxZ });
+    const _luEntry = { pts, lu, minX, maxX, minZ, maxZ };
+    landusePolygons.push(_luEntry);
+    polyGridAdd(landuseGrid, _luEntry);
   });
 
   // Station landmarks(明治: 鉄道開通前なので駅なし)
@@ -3504,8 +3575,12 @@ function drawMinimap() {
   const R = MM_RANGE + 60; // 表示範囲外の要素は描画コマンド自体を発行しない
 
   // 実形状の水面ポリゴン(道路より下層に描く)
+  // 【重要】以前はminimapWaterPolys/minimapRoads(取得済み全件。増え続けて減らない)を
+  // 毎回全件走査していた。drawMinimapは間引いても約20fpsで呼ばれ続けるため、
+  // 探索が進むほど1フレームあたりのコストが際限なく悪化していた
+  // (長時間プレイでの重量化の主因の一つ)。空間ハッシュで表示範囲の近傍だけ拾う。
   mctx.fillStyle = '#2a6a9a';
-  for (const wp of minimapWaterPolys) {
+  for (const wp of queryPolyGrid(minimapWaterGrid, px - R, px + R, pz - R, pz + R)) {
     if (wp.minX - px > R || px - wp.maxX > R || wp.minZ - pz > R || pz - wp.maxZ > R) continue;
     mctx.beginPath();
     const p0 = toMap(wp.pts[0].x, wp.pts[0].z);
@@ -3518,7 +3593,7 @@ function drawMinimap() {
     mctx.fill();
   }
 
-  for (const r of minimapRoads) {
+  for (const r of queryRoadGrid(px - R, px + R, pz - R, pz + R)) {
     if ((r.x1-px > R && r.x2-px > R) || (px-r.x1 > R && px-r.x2 > R) ||
         (r.z1-pz > R && r.z2-pz > R) || (pz-r.z1 > R && pz-r.z2 > R)) continue;
     const t = r.type || 'road';
@@ -3906,7 +3981,9 @@ function processTileData(data) {
     const pts = el.geometry.map(g => latLonToXZ(g.lat, g.lon));
     let minX=Infinity, maxX=-Infinity, minZ=Infinity, maxZ=-Infinity;
     pts.forEach(p => { minX=Math.min(minX,p.x); maxX=Math.max(maxX,p.x); minZ=Math.min(minZ,p.z); maxZ=Math.max(maxZ,p.z); });
-    landusePolygons.push({ pts, lu, minX, maxX, minZ, maxZ });
+    const _luEntry = { pts, lu, minX, maxX, minZ, maxZ };
+    landusePolygons.push(_luEntry);
+    polyGridAdd(landuseGrid, _luEntry);
   });
   // 最後にway IDを記録(カテゴリ別の3パスが終わってから)
   data.elements.forEach(el => { if (el.type === 'way') seenOSMWays.add(el.id); });
@@ -4056,11 +4133,14 @@ function generateChunk(chunkX, chunkZ) {
   const beforeCount = scene.children.length; // snapshot to track added meshes
 
   const x0 = worldX, z0 = worldZ, x1 = worldX + CHUNK_SIZE, z1 = worldZ + CHUNK_SIZE;
-  // チャンク周辺のポリゴンだけに絞る(以降の判定を軽く)
-  const nearAvoid = avoidPolygons.filter(p => !(x1 < p.minX || x0 > p.maxX || z1 < p.minZ || z0 > p.maxZ));
+  // チャンク周辺のポリゴンだけに絞る(以降の判定を軽く)。
+  // 【重要】以前はavoidPolygons/landusePolygons(取得済み全件。増え続けて減らない)を
+  // 毎回.filter()で全件走査していたため、探索が進むほどチャンク生成コストが際限なく
+  // 悪化していた(長時間プレイでの重量化の主因の一つ)。空間ハッシュで近傍だけ拾う。
+  const nearAvoid = queryPolyGrid(avoidGrid, x0, x1, z0, z1);
   const inAvoid = (x, z) => nearAvoid.some(p =>
     x >= p.minX && x <= p.maxX && z >= p.minZ && z <= p.maxZ && pointInPolygon(x, z, p.pts));
-  const nearLanduse = landusePolygons.filter(p => !(x1 + 30 < p.minX || x0 - 30 > p.maxX || z1 + 30 < p.minZ || z0 - 30 > p.maxZ));
+  const nearLanduse = queryPolyGrid(landuseGrid, x0 - 30, x1 + 30, z0 - 30, z1 + 30);
   const inLanduse = (x, z) => nearLanduse.some(p =>
     x >= p.minX && x <= p.maxX && z >= p.minZ && z <= p.maxZ && pointInPolygon(x, z, p.pts));
 
@@ -4077,7 +4157,9 @@ function generateChunk(chunkX, chunkZ) {
   // 山道など単独の1本道は延長が閾値に届かないので家は並ばない。
   const nearMinor = [];
   let minorLen = 0;
-  for (const r of minimapRoads) {
+  // 【重要】以前はminimapRoads(取得済み全道路。増え続けて減らない)を毎回全件走査していた。
+  // チャンク生成のたびに走る頻出パスなので空間ハッシュで近傍だけ拾う。
+  for (const r of queryRoadGrid(x0 - 40, x1 + 40, z0 - 40, z1 + 40)) {
     if (r.type !== 'road' && r.type !== 'tertiary') continue;
     if (Math.max(r.x1, r.x2) < x0 - 40 || Math.min(r.x1, r.x2) > x1 + 40 ||
         Math.max(r.z1, r.z2) < z0 - 40 || Math.min(r.z1, r.z2) > z1 + 40) continue;
