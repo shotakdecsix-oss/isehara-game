@@ -2514,37 +2514,56 @@ async function loadElevations() {
 // これで遠景メッシュ(farMesh、半径6km=直径12km相当を描画)が縁の高さでクランプされて
 // 平坦になるのを解消し、北西に大山が立ち上がり、南は海面へ下る本物の地形が地平に現れる。
 //
-// 「伊勢原と同じ解像度を全域で」という要望に対し、±14kmを一括で170m間隔にすると
-// 約28,900点(現行の12倍)必要になり、公開APIへの負荷・初回背景取得だけで5分以上かかる
-// 問題があった。そこで「プレイヤー追従型」にする: カバー範囲自体を約±9.4km(直径約18.9km。
-// farMeshの直径12kmに余裕を持たせた広さ)に縮め、代わりに解像度を約170〜260m相当まで
-// 引き上げる。プレイヤーが中心から離れると(checkWideTerrain)自動で現在地を中心に取り直す
-// ため、足元・近くの地形は常に伊勢原と同程度の解像度になる。ただし移動先未到達のはるか遠方の
-// 山並みは、次にその場所へ近づいて取り直すまでは今までどおり粗いままになる。
-const WIDE_HALF_LAT = 0.085, WIDE_HALF_LON = 0.085;   // ≈ ±9.4km(直径約18.9km)
-const WIDE_SEGS = 72, WIDE_SEGS1 = WIDE_SEGS + 1;      // 約170〜260m間隔(詳細地形とほぼ同等)
+// 「伊勢原と同じ解像度を全域で」に一段階のグリッドで対応しようとすると、広い範囲を
+// 高解像度で覆うために一度に大量の点(50バッチ超)を取りに行くことになり、公開APIや
+// プロキシが詰まって「格子状フォールバックに落ちる」「取り直しに5分かかる」不具合が
+// 起きていた。そこで2段階構成にする:
+//   ① FAR  = 広い範囲(±14km)を低解像度で覆う。地平線に見える山並み・海岸線の概形用。
+//            取得点数が少ない(約9バッチ)ので初回・再取得とも短時間で確実に終わる。
+//   ② NEAR = プレイヤーの周囲だけ(±2km)を伊勢原と同程度の解像度(約170m間隔)で覆う。
+//            範囲が狭いので取得点数も少なく(約7バッチ)、頻繁に取り直しても軽い。
+// 実際の高さ問い合わせ(getWideTerrainY)は、まずNEARの範囲内ならNEARを、範囲外ならFARを返す。
+const WIDE_HALF_LAT = 0.13, WIDE_HALF_LON = 0.13;   // FAR: ≈ ±14km(低解像度)
+const WIDE_SEGS = 28, WIDE_SEGS1 = WIDE_SEGS + 1;   // FAR: 約1km間隔、約9バッチ
 const WIDE_W = 2 * WIDE_HALF_LON * SCALE * COS_LAT;
 const WIDE_D = 2 * WIDE_HALF_LAT * SCALE;
 // 遠景標高グリッドの中心(ワールド座標)。プレイヤーが遠くへ移動/ジャンプしたら中心を移して取り直す。
 // これで富士山など伊勢原から離れた場所でも実際の地形・標高が出る。
 let wideCX = 0, wideCZ = 0, wideLoading = false;
+
+const NEAR_HALF_LAT = 0.018, NEAR_HALF_LON = 0.018; // NEAR: ≈ ±2km(高解像度・プレイヤー追従)
+const NEAR_SEGS = 24, NEAR_SEGS1 = NEAR_SEGS + 1;   // NEAR: 約170m間隔、約7バッチ
+const NEAR_W = 2 * NEAR_HALF_LON * SCALE * COS_LAT;
+const NEAR_D = 2 * NEAR_HALF_LAT * SCALE;
+let nearElev = null, nearCX = 0, nearCZ = 0, nearLoading = false;
+
 let seaLevelM = 5;            // 海面の実標高(m)。スライダーで変更可(elevBase確定時に初期値を上書き)
 // wideElev は上方(遠景地形メッシュ定義の前)で宣言済み。flat [iz*WIDE_SEGS1+ix] = ゲーム高さ(実標高で固定)
 let SEA_Y = 0;                // 海面(seaLevelM)のゲーム高さ。SEA_Y = (seaLevelM - elevBase) * ELEV_SCALE
 
-function getWideTerrainY(x, z) {
-  if (!wideElev) return 0;
-  const nx = (x - wideCX + WIDE_W / 2) / WIDE_W * WIDE_SEGS; // グリッド中心 (wideCX,wideCZ) 基準
-  const nz = (z - wideCZ + WIDE_D / 2) / WIDE_D * WIDE_SEGS;
-  const ix = Math.max(0, Math.min(WIDE_SEGS - 1, Math.floor(nx)));
-  const iz = Math.max(0, Math.min(WIDE_SEGS - 1, Math.floor(nz)));
+// 汎用のバイリニア補間。inRangeOnly=true のときは範囲外で null を返す(NEARの範囲外判定に使う)。
+function sampleGrid(elev, cx, cz, w, d, segs, segs1, x, z, inRangeOnly) {
+  if (!elev) return null;
+  const nx = (x - cx + w / 2) / w * segs;
+  const nz = (z - cz + d / 2) / d * segs;
+  if (inRangeOnly && (nx < 0 || nx > segs || nz < 0 || nz > segs)) return null;
+  const ix = Math.max(0, Math.min(segs - 1, Math.floor(nx)));
+  const iz = Math.max(0, Math.min(segs - 1, Math.floor(nz)));
   const fx = Math.max(0, Math.min(1, nx - ix));
   const fz = Math.max(0, Math.min(1, nz - iz));
-  const h00 = wideElev[ iz    * WIDE_SEGS1 + ix    ];
-  const h10 = wideElev[ iz    * WIDE_SEGS1 + ix + 1];
-  const h01 = wideElev[(iz+1) * WIDE_SEGS1 + ix    ];
-  const h11 = wideElev[(iz+1) * WIDE_SEGS1 + ix + 1];
+  const h00 = elev[ iz    * segs1 + ix    ];
+  const h10 = elev[ iz    * segs1 + ix + 1];
+  const h01 = elev[(iz+1) * segs1 + ix    ];
+  const h11 = elev[(iz+1) * segs1 + ix + 1];
   return h00*(1-fx)*(1-fz) + h10*fx*(1-fz) + h01*(1-fx)*fz + h11*fx*fz;
+}
+
+function getWideTerrainY(x, z) {
+  // まずプレイヤー追従の高解像度NEARグリッドの範囲内かを見る(範囲外ならnull)
+  const near = sampleGrid(nearElev, nearCX, nearCZ, NEAR_W, NEAR_D, NEAR_SEGS, NEAR_SEGS1, x, z, true);
+  if (near !== null) return near;
+  // 範囲外、またはNEAR未取得なら低解像度のFARグリッドへフォールバック
+  return sampleGrid(wideElev, wideCX, wideCZ, WIDE_W, WIDE_D, WIDE_SEGS, WIDE_SEGS1, x, z, false) || 0;
 }
 
 async function loadWideTerrain(centerX = 0, centerZ = 0) {
@@ -2587,16 +2606,65 @@ async function loadWideTerrain(centerX = 0, centerZ = 0) {
   if (reCenter) { statusEl.textContent = '🏔 地形反映完了'; setTimeout(() => { statusEl.style.display = 'none'; }, 2500); }
 }
 
-// プレイヤーが遠景グリッドの中心から離れすぎたら、その場所を中心に取り直す(富士山などへ飛んでも地形が出る)。
-// カバー範囲を縮めて解像度を上げた分(プレイヤー追従型)、遠景描画(farMesh、半径6km)が
-// グリッド外周のクランプ領域に入る前に早めに取り直す必要があるため、閾値を0.32→0.2に前倒しした。
+// プレイヤーが遠景(FAR)グリッドの中心から離れすぎたら、その場所を中心に取り直す
+// (富士山などへ飛んでも地形が出る)。FARは範囲が広いので頻度は控えめでよい。
 let _wideCheckFrame = 0;
 function checkWideTerrain() {
   if (wideLoading || !wideElev) return; // 初回ロード中/未取得は何もしない
   if ((++_wideCheckFrame) % 120 !== 0) return; // ~2秒ごと
-  if (Math.abs(player.position.x - wideCX) > WIDE_W * 0.2 ||
-      Math.abs(player.position.z - wideCZ) > WIDE_D * 0.2) {
+  if (Math.abs(player.position.x - wideCX) > WIDE_W * 0.32 ||
+      Math.abs(player.position.z - wideCZ) > WIDE_D * 0.32) {
     loadWideTerrain(player.position.x, player.position.z);
+  }
+}
+
+// NEAR(プレイヤー追従の高解像度グリッド)の取得。範囲が狭く点数も少ないので、
+// FARと同じロジックだが速く終わる(約7バッチ)。
+async function loadNearTerrain(centerX = 0, centerZ = 0) {
+  if (nearLoading) return;
+  nearLoading = true;
+  const pts = [];
+  for (let iz = 0; iz < NEAR_SEGS1; iz++)
+    for (let ix = 0; ix < NEAR_SEGS1; ix++) {
+      const wx = centerX - NEAR_W/2 + ix * NEAR_W / NEAR_SEGS;
+      const wz = centerZ - NEAR_D/2 + iz * NEAR_D / NEAR_SEGS;
+      pts.push(xzToLatLon(wx, wz));
+    }
+  const raw = new Array(pts.length).fill(null);
+  try {
+    const batches = [];
+    for (let i = 0; i < pts.length; i += 100) batches.push(pts.slice(i, i + 100));
+    const results = await runLimited(batches, batch => {
+      const loc = batch.map(ll => `${ll.lat.toFixed(6)},${ll.lon.toFixed(6)}`).join('|');
+      return fetch(`https://api.opentopodata.org/v1/srtm30m?locations=${encodeURIComponent(loc)}`).then(r => r.json());
+    });
+    for (let bi = 0; bi < results.length; bi++) {
+      const j = results[bi];
+      if (!j || !j.results) { nearLoading = false; return; } // 失敗時は現状維持(古いNEAR/FARへ自動フォールバック)
+      j.results.forEach((r, k) => { raw[bi*100 + k] = r.elevation; });
+    }
+  } catch (e) { nearLoading = false; return; }
+  const arr = new Float32Array(pts.length);
+  const oceanFloor = (0 - elevBase) * ELEV_SCALE - 10;
+  for (let i = 0; i < raw.length; i++) {
+    const m = raw[i];
+    arr[i] = (m == null) ? oceanFloor : (m - elevBase) * ELEV_SCALE;
+  }
+  nearElev = arr; nearCX = centerX; nearCZ = centerZ;
+  nearLoading = false;
+  updateFarMesh(true);
+}
+
+// プレイヤーがNEARグリッドの中心から離れたら取り直す。範囲が狭い分、判定・取り直しの
+// 両方をFARより頻繁にし、常にプレイヤー周辺だけは高解像度になるよう追従させる。
+let _nearCheckFrame = 0;
+function checkNearTerrain() {
+  if (nearLoading) { return; }
+  if ((++_nearCheckFrame) % 30 !== 0) return; // ~0.5秒ごと(範囲が狭いので追従を速める)
+  if (!nearElev ||
+      Math.abs(player.position.x - nearCX) > NEAR_W * 0.3 ||
+      Math.abs(player.position.z - nearCZ) > NEAR_D * 0.3) {
+    loadNearTerrain(player.position.x, player.position.z);
   }
 }
 
@@ -2675,19 +2743,28 @@ async function fetchOSMData() {
   const bb = `${OSM_BOUNDS.minLat},${OSM_BOUNDS.minLon},${OSM_BOUNDS.maxLat},${OSM_BOUNDS.maxLon}`;
   const query = `[out:json][timeout:40];(way["highway"](${bb});way["building"](${bb});way["landuse"~"residential|commercial|industrial|retail|mixed_use|farmland|orchard|meadow|allotments|forest"](${bb});way["leisure"~"park|garden|playground"](${bb});way["natural"~"water|wood"](${bb});way["waterway"~"river|stream|canal|riverbank"](${bb});relation["natural"="water"](${bb});relation["waterway"="riverbank"](${bb});way["railway"="rail"](${bb});node["railway"="station"](${bb});node["railway"="halt"](${bb});node["public_transport"="station"](${bb}););out geom;`;
   const url = 'https://overpass-api.de/api/interpreter?data=' + encodeURIComponent(query);
-  try {
-    statusEl.textContent = '🗺 伊勢原マップ取得中... (最大45秒)';
-    // クエリ自体のOverpass側タイムアウトが40秒なのに、クライアント側は32秒で見切っていたため、
-    // サーバーがまだ処理中でも早期に諦めてフォールバック(単純格子状マップ)になることがあった。
-    // サーバー側タイムアウトより余裕を持たせる。
-    const res = await Promise.race([
-      fetch(url).then(r=>r.json()),
-      new Promise((_,rej)=>setTimeout(()=>rej(new Error('timeout')), 45000))
-    ]);
-    return res;
-  } catch(e) {
-    return null;
+  // 一度の失敗(429やタイムアウト)ですぐ単純格子状のフォールバックマップに落とすと、Overpassが
+  // 一時的に混雑していただけでも見た目が大きく崩れてしまう。最大3回、間隔を空けて再試行する。
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      statusEl.textContent = attempt === 1
+        ? '🗺 伊勢原マップ取得中... (最大45秒)'
+        : `🗺 伊勢原マップ取得再試行中... (${attempt}/3)`;
+      // クエリ自体のOverpass側タイムアウトが40秒なのに、以前クライアント側は32秒で見切っていたため、
+      // サーバーがまだ処理中でも早期に諦めてフォールバックになることがあった。サーバー側より余裕を持たせる。
+      const res = await Promise.race([
+        fetch(url),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 45000))
+      ]);
+      if (!res.ok) throw new Error('HTTP ' + res.status); // 429/5xx等
+      const json = await res.json();
+      if (!json || !json.elements) throw new Error('no elements');
+      return json;
+    } catch (e) {
+      if (attempt < 3) await new Promise(r => setTimeout(r, 4000 * attempt)); // 4s, 8s と間隔を空けて再試行
+    }
   }
+  return null; // 3回とも失敗した場合のみフォールバックマップを使う
 }
 
 // data を省略した場合は自分で fetchOSMData() する(従来どおりの単体呼び出しにも対応)
@@ -2904,7 +2981,9 @@ function getStartLocation() {
   // 現在地の地形は遠景グリッド(約1km間隔)+ OSMタイルで表示する。
   const loc = await startLocP;
   if (!isModeSwitch) jumpToLatLon(loc.lat, loc.lon);
-  loadWideTerrain(player.position.x, player.position.z); // 最終的なプレイヤー位置を中心に遠景地形を取得
+  // 最終的なプレイヤー位置を中心に、FAR(広域・低解像度)とNEAR(周辺・高解像度)を両方取得
+  loadWideTerrain(player.position.x, player.position.z);
+  loadNearTerrain(player.position.x, player.position.z);
 })();
 
 // ======= REAL-WORLD COORDINATES =======
@@ -2926,9 +3005,12 @@ function jumpToLatLon(toLat, toLon) {
   player.position.set(pos.x, 0, pos.z); // yはanimateの床追従が合わせる
   if (playerMarker) { playerMarker.setLatLng([toLat, toLon]); playerMarker.openPopup(); }
   if (leafletMap) leafletMap.setView([toLat, toLon], leafletMap.getZoom());
-  // 遠景グリッドの外へ飛んだら、その場を中心に地形を取り直す(富士山などでも地形・標高が出る)
+  // 遠景(FAR)グリッドの外へ飛んだら、その場を中心に地形を取り直す(富士山などでも地形・標高が出る)
   if (wideElev && (Math.abs(pos.x - wideCX) > WIDE_W * 0.32 || Math.abs(pos.z - wideCZ) > WIDE_D * 0.32))
     loadWideTerrain(pos.x, pos.z);
+  // マップジャンプは高確率でNEARグリッドの範囲外になるので、こちらは毎回無条件で取り直す
+  // (範囲が狭く数秒〜十秒程度で終わるため、ジャンプ直後に足元の高解像度地形をすぐ用意できる)
+  loadNearTerrain(pos.x, pos.z);
   setTimeout(() => mapOverlay.classList.remove('active'), 300);
 }
 
@@ -3562,7 +3644,7 @@ function updateLoadingIndicator() {
   // 取得待ち/取得中のOSMタイル、道路確定待ちの建物生成チャンク、
   // フレーム分割でまだ生成しきっていないタイル取得分の建物、のいずれかがあれば「読み込み中」
   const busy = osmTileActiveCount > 0 || osmTileQueue.length > 0 || chunkGenQueue.length > 0 ||
-               pendingBuildingIdx < pendingBuildings.length;
+               pendingBuildingIdx < pendingBuildings.length || wideLoading || nearLoading;
   tileLoadingEl.classList.toggle('active', busy);
 }
 
@@ -4102,6 +4184,7 @@ function animate() {
   checkOSMTiles();
   // 遠景標高グリッドをプレイヤーに追従(遠くへジャンプしても実地形・標高が出る)
   checkWideTerrain();
+  checkNearTerrain(); // プレイヤー周辺の高解像度グリッドも追従させる
 
   // 山の森(プレイヤー周囲だけ・移動で作り直し)
   updateForest();
