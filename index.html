@@ -40,7 +40,10 @@ body { overflow:hidden; background:#000; font-family:'Segoe UI',sans-serif; }
    起動時の #status と違い常駐監視で、歩いている最中に「今読み込み中なのか、
    本当に何もないエリアなのか」を区別できるようにする */
 #tileLoading {
-  position:fixed; top:16px; right:16px;
+  /* 以前は top:16px;right:16px で #uiToggleBtn(同じ位置・z-index:40)の真下に
+     完全に隠れてしまい、条件は満たしていても画面上には一切見えていなかった。
+     #info(top:64px)の下の空きスペースへ移動する。 */
+  position:fixed; top:150px; right:16px;
   background:rgba(70,35,10,0.85); color:#ffcf80;
   border:1px solid rgba(255,170,60,0.7); border-radius:8px;
   padding:6px 12px; font-size:12px;
@@ -2486,15 +2489,22 @@ async function loadElevations() {
 }
 
 // ======= 遠景の実地形(北西=大山の山塊 / 南=相模湾へ下る海岸) =======
-// 詳細標高グリッド(±約2.2km)の外側に、粗い実標高グリッド(±約14km)を背景として敷く。
-// これで遠景メッシュ(farMesh)が縁の高さでクランプされて平坦になるのを解消し、
-// 北西に大山が立ち上がり、南は海面へ下る本物の地形が地平に現れる。
-// opentopodata へのAPI負荷を抑えるため低解像度(29×29点)、本編ロード後にバックグラウンド取得。
-const WIDE_HALF_LAT = 0.13, WIDE_HALF_LON = 0.13;   // ≈ ±14km
-const WIDE_SEGS = 28, WIDE_SEGS1 = WIDE_SEGS + 1;
+// 詳細標高グリッド(±約2.2km、約170m間隔)の外側に、実標高グリッドを背景として敷く。
+// これで遠景メッシュ(farMesh、半径6km=直径12km相当を描画)が縁の高さでクランプされて
+// 平坦になるのを解消し、北西に大山が立ち上がり、南は海面へ下る本物の地形が地平に現れる。
+//
+// 「伊勢原と同じ解像度を全域で」という要望に対し、±14kmを一括で170m間隔にすると
+// 約28,900点(現行の12倍)必要になり、公開APIへの負荷・初回背景取得だけで5分以上かかる
+// 問題があった。そこで「プレイヤー追従型」にする: カバー範囲自体を約±9.4km(直径約18.9km。
+// farMeshの直径12kmに余裕を持たせた広さ)に縮め、代わりに解像度を約170〜260m相当まで
+// 引き上げる。プレイヤーが中心から離れると(checkWideTerrain)自動で現在地を中心に取り直す
+// ため、足元・近くの地形は常に伊勢原と同程度の解像度になる。ただし移動先未到達のはるか遠方の
+// 山並みは、次にその場所へ近づいて取り直すまでは今までどおり粗いままになる。
+const WIDE_HALF_LAT = 0.085, WIDE_HALF_LON = 0.085;   // ≈ ±9.4km(直径約18.9km)
+const WIDE_SEGS = 72, WIDE_SEGS1 = WIDE_SEGS + 1;      // 約170〜260m間隔(詳細地形とほぼ同等)
 const WIDE_W = 2 * WIDE_HALF_LON * SCALE * COS_LAT;
 const WIDE_D = 2 * WIDE_HALF_LAT * SCALE;
-// 遠景標高グリッドの中心(ワールド座標)。プレイヤーが遠くへジャンプしたら中心を移して取り直す。
+// 遠景標高グリッドの中心(ワールド座標)。プレイヤーが遠くへ移動/ジャンプしたら中心を移して取り直す。
 // これで富士山など伊勢原から離れた場所でも実際の地形・標高が出る。
 let wideCX = 0, wideCZ = 0, wideLoading = false;
 let seaLevelM = 5;            // 海面の実標高(m)。スライダーで変更可(elevBase確定時に初期値を上書き)
@@ -2555,13 +2565,15 @@ async function loadWideTerrain(centerX = 0, centerZ = 0) {
   if (reCenter) { statusEl.textContent = '🏔 地形反映完了'; setTimeout(() => { statusEl.style.display = 'none'; }, 2500); }
 }
 
-// プレイヤーが遠景グリッドの中心から離れすぎたら、その場所を中心に取り直す(富士山などへ飛んでも地形が出る)
+// プレイヤーが遠景グリッドの中心から離れすぎたら、その場所を中心に取り直す(富士山などへ飛んでも地形が出る)。
+// カバー範囲を縮めて解像度を上げた分(プレイヤー追従型)、遠景描画(farMesh、半径6km)が
+// グリッド外周のクランプ領域に入る前に早めに取り直す必要があるため、閾値を0.32→0.2に前倒しした。
 let _wideCheckFrame = 0;
 function checkWideTerrain() {
   if (wideLoading || !wideElev) return; // 初回ロード中/未取得は何もしない
   if ((++_wideCheckFrame) % 120 !== 0) return; // ~2秒ごと
-  if (Math.abs(player.position.x - wideCX) > WIDE_W * 0.32 ||
-      Math.abs(player.position.z - wideCZ) > WIDE_D * 0.32) {
+  if (Math.abs(player.position.x - wideCX) > WIDE_W * 0.2 ||
+      Math.abs(player.position.z - wideCZ) > WIDE_D * 0.2) {
     loadWideTerrain(player.position.x, player.position.z);
   }
 }
@@ -3335,8 +3347,12 @@ function floorHeightAt(x, z, fromY) {
 }
 
 // ======= TILE-BASED DYNAMIC OSM FETCHING =======
-// Each tile is 700m x 700m. When the player enters a new tile, fetch its OSM data.
-const OSM_TILE_M = 700;
+// Overpassの公開サーバーは(プロキシ側で守っている)実質1リクエスト/秒程度の上限があり、
+// これはタイルをどれだけ並行リクエストしても変わらない(サーバー側でホスト単位に直列化されるため)。
+// つまり「1秒間に処理できるタイル数」はほぼ固定で、稼げるのは「1タイルでカバーする面積」だけ。
+// 以前は700m四方だったため、ダッシュ(最大45m/s)で移動すると新規エリアのカバーが追いつかない
+// ことがあった。1タイルを大きくして、同じ範囲を埋めるのに必要なリクエスト数自体を減らす。
+const OSM_TILE_M = 1100;
 const fetchedOSMTiles = new Set();   // キュー投入済み(取得中 or 取得完了)のタイル
 const loadedOSMTiles = new Set();    // 実際に処理が完了した(道路が確定した)タイル。
                                       // 「地形→道路→建物→木」の順を守るため、チャンクの
@@ -3518,7 +3534,10 @@ async function fetchOneOSMTile() {
 // 「何もない」のか「まだ読み込み中」なのかをプレイヤーが区別できるようにするための表示。
 function updateLoadingIndicator() {
   if (!tileLoadingEl) return;
-  const busy = osmTileActiveCount > 0 || osmTileQueue.length > 0 || chunkGenQueue.length > 0;
+  // 取得待ち/取得中のOSMタイル、道路確定待ちの建物生成チャンク、
+  // フレーム分割でまだ生成しきっていないタイル取得分の建物、のいずれかがあれば「読み込み中」
+  const busy = osmTileActiveCount > 0 || osmTileQueue.length > 0 || chunkGenQueue.length > 0 ||
+               pendingBuildingIdx < pendingBuildings.length;
   tileLoadingEl.classList.toggle('active', busy);
 }
 
