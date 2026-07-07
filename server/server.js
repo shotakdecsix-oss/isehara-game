@@ -29,6 +29,7 @@ const MAX_ATTEMPTS = 3;
 const APIS = {
   '/api/elevation': { upstream: 'https://api.opentopodata.org', dir: 'elevation' },
   '/api/overpass':  { upstream: 'https://overpass-api.de/api/interpreter', dir: 'overpass' },
+  '/api/nominatim': { upstream: 'https://nominatim.openstreetmap.org/reverse', dir: 'nominatim' }, // 現在地の住所表示(逆ジオコーディング)用
 };
 
 const MIME = {
@@ -52,6 +53,7 @@ const INJECT = `<script>
   const MAP = [
     ['https://api.opentopodata.org', '/api/elevation'],
     ['https://overpass-api.de/api/interpreter', '/api/overpass'],
+    ['https://nominatim.openstreetmap.org/reverse', '/api/nominatim'],
   ];
   let lastApiWasCacheHit = false;
   const origFetch = window.fetch.bind(window);
