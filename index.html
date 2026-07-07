@@ -556,6 +556,7 @@ function addRoadRecord(r) { minimapRoads.push(r); roadGridAdd(r); }
 // 逆に浮いて見えたりしていた。ジオメトリだけ差し替え、Mesh自体・マテリアルは使い回す。
 function rebuildRoadMesh(r) {
   if (!r.mesh) return;
+  if (r.type === 'motorway') { rebuildMotorwayMesh(r); return; } // 高架は専用の桁ジオメトリで再構築
   const geo = makeRoadGeo(r.x1, r.z1, r.x2, r.z2, r.rw, r.yOff);
   if (!geo) return;
   r.mesh.geometry.dispose();
@@ -582,9 +583,10 @@ function rebuildRoadsInBounds(x0, x1, z0, z1) {
 // 揃っている)たびに呼び、そのチャンクにかかる道路だけ現在の地形に合わせて再構築する。
 function rebuildRoadsNearChunk(chunkX, chunkZ) {
   const margin = 20; // 道幅ぶんの余裕
-  rebuildRoadsInBounds(
-    chunkX * CHUNK_SIZE - margin, chunkX * CHUNK_SIZE + CHUNK_SIZE + margin,
-    chunkZ * CHUNK_SIZE - margin, chunkZ * CHUNK_SIZE + CHUNK_SIZE + margin);
+  const x0 = chunkX * CHUNK_SIZE - margin, x1 = chunkX * CHUNK_SIZE + CHUNK_SIZE + margin;
+  const z0 = chunkZ * CHUNK_SIZE - margin, z1 = chunkZ * CHUNK_SIZE + CHUNK_SIZE + margin;
+  rebuildRoadsInBounds(x0, x1, z0, z1);
+  rebuildAreaPolysInBounds(x0, x1, z0, z1); // 川・公園・田畑ポリゴンも同じタイミングで合わせ直す
 }
 // 点(x,z)が、道路の中心線から (道幅/2 + extra) 以内にあるか(近傍セルだけ調べる)
 function roadNear(x, z, extra) {
@@ -1587,10 +1589,12 @@ function addRailXing(pt) {
 // motorwayテクスチャのUV列(路面/壁/桁)を使い分ける。橋脚はInstancedMesh。
 // 当たり判定: 桁の薄い水平スラブ(桁上に立てる)+橋脚の柱のみ → 高架下は自由に通れる
 const MWY_H = 7, MWY_W = 16;
-function addMotorway(x1, z1, x2, z2) {
+// 高架(高速道路)の桁ジオメトリだけを作る部分。resnap(rebuildMotorwayMesh)からも
+// 同じ関数を使って再生成できるよう、addMotorwayから切り出した。
+function makeMotorwayGeo(x1, z1, x2, z2) {
   const dx = x2 - x1, dz = z2 - z1;
   const len = Math.hypot(dx, dz);
-  if (len < 2) return;
+  if (len < 2) return null;
   const nx = dx / len, nz = dz / len, px = -nz, pz = nx;
   const hw2 = MWY_W / 2;
   const steps = Math.max(1, Math.round(len / 6));
@@ -1625,6 +1629,26 @@ function addMotorway(x1, z1, x2, z2) {
   geo.setAttribute('position', new THREE.Float32BufferAttribute(P, 3));
   geo.setAttribute('uv', new THREE.Float32BufferAttribute(UV, 2));
   geo.setIndex(I);
+  return geo;
+}
+
+// 高架の桁メッシュを、現在の地形高さに合わせて作り直す(rebuildRoadMeshから呼ばれる)
+function rebuildMotorwayMesh(r) {
+  if (!r.mesh) return;
+  const geo = makeMotorwayGeo(r.x1, r.z1, r.x2, r.z2);
+  if (!geo) return;
+  r.mesh.geometry.dispose();
+  r.mesh.geometry = geo;
+}
+
+function addMotorway(x1, z1, x2, z2) {
+  const dx = x2 - x1, dz = z2 - z1;
+  const len = Math.hypot(dx, dz);
+  if (len < 2) return;
+  const nx = dx / len, nz = dz / len;
+  const hw2 = MWY_W / 2;
+  const geo = makeMotorwayGeo(x1, z1, x2, z2);
+  if (!geo) return;
   const mesh = new THREE.Mesh(geo, realRoadMat('motorway', 24));
   mesh.renderOrder = 1;
   scene.add(mesh);
@@ -1651,7 +1675,8 @@ function addMotorway(x1, z1, x2, z2) {
     cb.chunkKey = currentChunkKey;
     collisionBoxes.push(cb); collGridAdd(cb);
   }
-  addRoadRecord({ x1, z1, x2, z2, type: 'motorway', rw: MWY_W });
+  // mesh を記録し、NEAR地形更新時に桁を現在の地形高さへ作り直せるようにする(浮き/埋まり対策)
+  addRoadRecord({ x1, z1, x2, z2, type: 'motorway', rw: MWY_W, mesh });
 }
 
 // Shared road materials (created once, reused)
@@ -2073,6 +2098,26 @@ const farmMat = (() => {
 
 // ポリゴンから地形に沿った面メッシュを1枚生成(三角形分割はShapeGeometry=earcut)
 // holes: 内周リング(中州など)の配列(省略可)
+// 水域・公園・田畑ポリゴンのメッシュ一覧。NEAR高解像度地形が更新されたとき、
+// 範囲にかかるものだけ高さを再スナップする(浮き/埋まり対策。道路と同じ考え方)。
+const areaPolyMeshes = [];
+function rebuildAreaPolyMesh(entry) {
+  const pos = entry.mesh.geometry.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i), z = pos.getZ(i); // Y(高さ)だけ書き換えるのでX/Zはそのまま読める
+    pos.setY(i, getGroundY(x, z) + entry.yOff);
+  }
+  pos.needsUpdate = true;
+  entry.mesh.geometry.computeVertexNormals();
+  entry.mesh.geometry.computeBoundingSphere();
+}
+function rebuildAreaPolysInBounds(x0, x1, z0, z1) {
+  for (const e of areaPolyMeshes) {
+    if (e.maxX < x0 || e.minX > x1 || e.maxZ < z0 || e.minZ > z1) continue;
+    rebuildAreaPolyMesh(e);
+  }
+}
+
 function buildAreaPoly(pts, mat, yOff, holes) {
   const shape = new THREE.Shape();
   shape.moveTo(pts[0].x, pts[0].z);
@@ -2094,6 +2139,9 @@ function buildAreaPoly(pts, mat, yOff, holes) {
   const mesh = new THREE.Mesh(geo, mat);
   mesh.renderOrder = 1;
   scene.add(mesh);
+  let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+  for (const p of pts) { minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minZ = Math.min(minZ, p.z); maxZ = Math.max(maxZ, p.z); }
+  areaPolyMeshes.push({ mesh, yOff, minX, maxX, minZ, maxZ });
 }
 
 function scatterTreesIn(poly, sqmPerTree, cap) {
@@ -2667,6 +2715,13 @@ function checkWideTerrain() {
   }
 }
 
+// NEAR取得に失敗するたびに呼ぶ。既定回数(5回)を超えたら「NEARは使えない」扱いにして、
+// 建物生成がAPI障害で永久にブロックされないようにする(chunkNearTerrainReadyが参照)。
+function onNearTerrainFail() {
+  _nearFailCount++;
+  if (_nearFailCount >= 5) _nearGiveUp = true;
+}
+
 // NEAR(プレイヤー追従の高解像度グリッド)の取得。範囲が狭く点数も少ないので、
 // FARと同じロジックだが速く終わる(約7バッチ)。
 async function loadNearTerrain(centerX = 0, centerZ = 0) {
@@ -2689,10 +2744,10 @@ async function loadNearTerrain(centerX = 0, centerZ = 0) {
     });
     for (let bi = 0; bi < results.length; bi++) {
       const j = results[bi];
-      if (!j || !j.results) { nearLoading = false; return; } // 失敗時は現状維持(古いNEAR/FARへ自動フォールバック)
+      if (!j || !j.results) { nearLoading = false; onNearTerrainFail(); return; } // 失敗時は現状維持(古いNEAR/FARへ自動フォールバック)
       j.results.forEach((r, k) => { raw[bi*100 + k] = r.elevation; });
     }
-  } catch (e) { nearLoading = false; return; }
+  } catch (e) { nearLoading = false; onNearTerrainFail(); return; }
   const arr = new Float32Array(pts.length);
   const oceanFloor = (0 - elevBase) * ELEV_SCALE - 10;
   for (let i = 0; i < raw.length; i++) {
@@ -2701,18 +2756,23 @@ async function loadNearTerrain(centerX = 0, centerZ = 0) {
   }
   nearElev = arr; nearCX = centerX; nearCZ = centerZ;
   nearLoading = false;
+  _nearFailCount = 0; _nearGiveUp = false; // 成功したのでリセット
   updateFarMesh(true);
   // NEARグリッドが更新された(=この範囲の地形高さが変わった可能性がある)ので、
-  // 範囲にかかる道路をすぐに新しい地形へ合わせ直す(浮き/埋まりを即座に解消する)
+  // 範囲にかかる道路・川/公園/田畑ポリゴンをすぐに新しい地形へ合わせ直す(浮き/埋まりを即座に解消する)
   rebuildRoadsInBounds(centerX - NEAR_W/2, centerX + NEAR_W/2, centerZ - NEAR_D/2, centerZ + NEAR_D/2);
+  rebuildAreaPolysInBounds(centerX - NEAR_W/2, centerX + NEAR_W/2, centerZ - NEAR_D/2, centerZ + NEAR_D/2);
 }
 
 // プレイヤーがNEARグリッドの中心から離れたら取り直す。範囲が狭い分、判定・取り直しの
 // 両方をFARより頻繁にし、常にプレイヤー周辺だけは高解像度になるよう追従させる。
-let _nearCheckFrame = 0;
+// 失敗が続く場合は間隔を伸ばして無駄打ちを防ぎつつ、一定回数を超えたら「NEARは無いもの」として
+// 建物生成のブロックを解除する(APIが長時間ダウンしても永久にチャンク生成が止まらないように)。
+let _nearCheckFrame = 0, _nearFailCount = 0, _nearGiveUp = false;
 function checkNearTerrain() {
-  if (nearLoading) { return; }
-  if ((++_nearCheckFrame) % 30 !== 0) return; // ~0.5秒ごと(範囲が狭いので追従を速める)
+  if (nearLoading) return;
+  const interval = 30 * Math.min(20, 1 + _nearFailCount); // 失敗するたび間隔を伸ばす(最大10秒)
+  if ((++_nearCheckFrame) % interval !== 0) return;
   if (!nearElev ||
       Math.abs(player.position.x - nearCX) > NEAR_W * 0.3 ||
       Math.abs(player.position.z - nearCZ) > NEAR_D * 0.3) {
@@ -4053,6 +4113,20 @@ function chunkTilesReady(chunkX, chunkZ) {
   return true;
 }
 
+// このチャンクが、プレイヤー追従の高解像度NEAR地形グリッドの範囲内に収まっているか。
+// 建物は生成時に一度だけ getGroundY で高さを焼き込むため、NEARが届く前に生成すると
+// 後からNEARが更新されても建物だけ取り残されて浮く/埋まる(道路のような再構築の仕組みが
+// 建物側には無い)。生成そのものをNEARが揃うまで遅らせることで、この問題を避ける。
+function chunkNearTerrainReady(chunkX, chunkZ) {
+  if (_nearGiveUp) return true; // API障害が続く場合は諦めてFARデータのまま進める
+  if (!nearElev) return false;
+  const x0 = chunkX * CHUNK_SIZE, z0 = chunkZ * CHUNK_SIZE;
+  const x1 = x0 + CHUNK_SIZE, z1 = z0 + CHUNK_SIZE;
+  const margin = 10; // 端ぎりぎりだと補間で範囲外扱いになりやすいので少し内側に余裕を持たせる
+  return x0 > nearCX - NEAR_W/2 + margin && x1 < nearCX + NEAR_W/2 - margin &&
+         z0 > nearCZ - NEAR_D/2 + margin && z1 < nearCZ + NEAR_D/2 - margin;
+}
+
 // 1フレームに1チャンクだけ生成するフレーム分割処理
 function processChunkQueue() {
   if (chunkGenQueue.length === 0) return;
@@ -4067,6 +4141,12 @@ function processChunkQueue() {
   // カバーするタイルの道路データがまだ届いていなければ、建物を生成せず後回しにする
   // (キュー末尾へ回し、他の準備済みチャンクを先に処理する)
   if (!chunkTilesReady(c.x, c.z)) {
+    chunkGenQueue.push(c);
+    return;
+  }
+  // NEAR(周辺高解像度)地形がまだこのチャンクを覆っていなければ、建物が変な高さで
+  // 焼き込まれないよう後回しにする(明治モードはNEARを使わないので対象外)
+  if (!IS_MEIJI && !chunkNearTerrainReady(c.x, c.z)) {
     chunkGenQueue.push(c);
     return;
   }
