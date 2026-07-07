@@ -847,6 +847,13 @@ const glowMat  = new THREE.MeshBasicMaterial({ color: 0x8040ff, transparent: tru
 // 特徴建物用の共有マテリアル
 const STOREFRONT_MAT = new THREE.MeshBasicMaterial({ color: 0xfff6cc }); // コンビニ等の明るい店構え
 const SIGN_BAND_MATS = [0xe83020, 0x2255dd, 0x11a04a, 0xff8800].map(c => new THREE.MeshBasicMaterial({ color: c }));
+// コンビニの実在チェーン系統色(ロゴ・文字は使わず色味だけ近似)用の帯マテリアルキャッシュ
+const bandMatCache = new Map();
+function bandMat(color) {
+  let m = bandMatCache.get(color);
+  if (!m) { m = new THREE.MeshBasicMaterial({ color }); bandMatCache.set(color, m); }
+  return m;
+}
 const YARD_MAT = new THREE.MeshLambertMaterial({ color: 0xb89868 }); // 校庭の土
 const HOUSE_PALETTE = [ // 手続き生成住宅の色バリエーション(現実モード用。他モードは addBuilding 内で置換)
   { w: 0xd8cdb8, r: 0x555a66 }, { w: 0xe8e0d0, r: 0x7a4a3a },
@@ -1364,6 +1371,46 @@ function isOnRoad(cx, cz, bw, bd) {
 }
 
 // Determine building visual style from OSM tags
+// マンション/集合住宅の共通スタイル(タグで明示apartmentsの場合も、後述の
+// サイズ判定でhouseから昇格させる場合も、同じ見た目を使う)
+const APARTMENT_STYLE = { color: 0x90a0c0, roofColor: 0x506080, emissive: 0x001122, type: 'apartment' };
+
+// 建物の高さ(メートル)を決める。building:height(実測値)があれば最優先、
+// なければbuilding:levels(階数)から推定、どちらも無ければランダム。
+function resolveBuildingHeight(tags) {
+  const hTag = parseFloat(tags['building:height']);
+  if (hTag > 0) return hTag;
+  const levels = parseInt(tags['building:levels']) || 1 + Math.floor(Math.random() * 3);
+  return Math.max(levels * 3, 3) + Math.random() * 2;
+}
+// 「house」判定の建物でも、高さ・フットプリント面積が明らかに一戸建ての域を超えていれば
+// マンション扱いに格上げする。building=yes/residentialのような曖昧なタグや、
+// 稀な誤タグ(巨大なのにhouse指定)でも、見た目で識別できるようにするため。
+const APT_HEIGHT_M = 10;   // これ以上(目安4階建て以上)ならマンション扱い
+const APT_FOOTPRINT_M2 = 200; // フットプリントがこれ以上ならマンション扱い
+function classifyResidential(style, w, d, h) {
+  if (!style || style.type !== 'house') return style;
+  if (h >= APT_HEIGHT_M || w * d >= APT_FOOTPRINT_M2) return APARTMENT_STYLE;
+  return style;
+}
+
+// 実在コンビニチェーンの「色の系統」だけを再現する(ロゴ・文字・商標は使わない)。
+// name/name:ja/brand/operatorのいずれかにチェーン名が含まれていれば、その系統色の
+// 帯(bandColor)を店構えに使う。該当しなければ既存の汎用オレンジ+ランダム帯に戻す。
+const CONBINI_BRANDS = [
+  { keys: ['セブン', '7-eleven', 'seven-eleven', '7eleven'], wall: 0xf5f3ee, band: 0xff7700 },
+  { keys: ['ローソン', 'lawson'],                              wall: 0xeef4fa, band: 0x0057a6 },
+  { keys: ['ファミリーマート', 'familymart', 'family mart'],   wall: 0xf0f7f0, band: 0x1a9c4b },
+];
+function convenienceStyle(tags) {
+  const nm = ((tags.name || '') + (tags['name:ja'] || '') + (tags.brand || '') + (tags.operator || '')).toLowerCase();
+  for (const b of CONBINI_BRANDS) {
+    if (b.keys.some(k => nm.includes(k)))
+      return { color: b.wall, roofColor: 0x555555, emissive: 0x150800, type: 'shop', bandColor: b.band };
+  }
+  return { color: 0xff8840, roofColor: 0xcc5500, emissive: 0x221100, type: 'shop' }; // ブランド不明は既存の汎用色
+}
+
 function getBuildingStyle(tags) {
   const am = tags.amenity || '', rel = tags.religion || '', bt = tags.building || '';
   const name = (tags.name || '') + (tags['name:ja'] || '');
@@ -1380,10 +1427,26 @@ function getBuildingStyle(tags) {
     return { color: 0xf8f8f8, roofColor: 0xdddddd, emissive: 0x111111, type: 'hospital' };
   if (am === 'townhall' || am === 'police' || am === 'fire_station' || name.includes('市役所') || name.includes('役場'))
     return { color: 0x6070a0, roofColor: 0x405080, emissive: 0x001133, type: 'government' };
-  if (tags.shop || bt === 'commercial' || am === 'supermarket' || am === 'convenience')
+  // 駅舎の建物ポリゴンが実際にOSMにあれば(building=train_station、または建物wayに
+  // railway=stationが付いている場合)、addStationの簡易フォールバック駅舎ではなく
+  // 本物の輪郭・高さでこちらが使われる。name.includes('駅')は「〜駅前」のような
+  // 無関係な店名を誤検出しやすいので使わない。
+  if (bt === 'train_station' || tags.railway === 'station')
+    return { color: 0xe8e2d0, roofColor: 0x445266, emissive: 0x111418, type: 'station' };
+  // 飲食店はshopでひとまとめにせず、レストラン/カフェ/ファストフードで描き分ける
+  // (addBuildingの店舗ディテール部分で、それぞれテラス席・オーニング・ドライブスルー風レーンを追加)
+  if (am === 'restaurant')
+    return { color: 0xd8843c, roofColor: 0x7a3f18, emissive: 0x1a0e04, type: 'restaurant' };
+  if (am === 'cafe')
+    return { color: 0xc8a878, roofColor: 0x6b4a2a, emissive: 0x140c04, type: 'cafe' };
+  if (am === 'fast_food')
+    return { color: 0xe8483c, roofColor: 0x992222, emissive: 0x220800, type: 'fastfood' };
+  if (am === 'convenience' || tags.shop === 'convenience')
+    return convenienceStyle(tags);
+  if (tags.shop || bt === 'commercial' || am === 'supermarket')
     return { color: 0xff8840, roofColor: 0xcc5500, emissive: 0x221100, type: 'shop' };
   if (bt === 'apartments')
-    return { color: 0x90a0c0, roofColor: 0x506080, emissive: 0x001122, type: 'apartment' };
+    return APARTMENT_STYLE;
   if (bt === 'house' || bt === 'detached' || bt === 'residential')
     return { color: 0xd4b070, roofColor: 0x886030, emissive: 0x110800, type: 'house' };
   if (bt === 'industrial' || bt === 'warehouse' || bt === 'factory')
@@ -1433,10 +1496,11 @@ function addBuilding(x, z, w, d, h, style) {
   }
 
   // ---- ファサード種別(手続きテクスチャ。神社仏閣・教会・キノコは従来の無地) ----
+  const isShopLike = type === 'shop' || type === 'restaurant' || type === 'cafe' || type === 'fastfood';
   const kind =
     (isMushroom || type === 'shrine' || type === 'temple' || type === 'church') ? null :
     type === 'industrial' ? 'ind' :
-    (floors <= 2 && (type === 'house' || type === 'default' || type === 'shop')) ? 'house' :
+    (floors <= 2 && (type === 'house' || type === 'default' || isShopLike)) ? 'house' :
     (type === 'house' || type === 'apartment') ? 'apt' : 'office';
   const mat = kind
     ? facadeMat(kind, wallC, (Math.random() * 2) | 0)
@@ -1530,6 +1594,10 @@ function addBuilding(x, z, w, d, h, style) {
     pitched(HIP_GEO, Math.max(1.4, minWD * 0.22), 1.6, rm); // 幅広の寄棟
   } else if (rtype === 'government') {
     dm(UNIT_DOME, rm, x, gy + h, z, minWD * 0.8, minWD * 0.8, minWD * 0.8); // Dome
+  } else if (rtype === 'station') {
+    // 駅舎: 陸屋根+出入口の庇(addStationのフォールバック駅舎と見た目を揃える)
+    dm(PARAPET_GEO, rm, x, gy + h, z, w + 0.6, 0.8, d + 0.6);
+    dm(UNIT_BOX, rm, x, gy + h + 0.1, z + d / 2 + 1.4, w * 0.6, 0.3, 2.8);
   } else {
     // 一般建物(現実モード)
     const isFlat = h >= 10 || (type === 'apartment' && h >= 7) || (type === 'industrial' && h >= 8);
@@ -1564,17 +1632,40 @@ function addBuilding(x, z, w, d, h, style) {
   }
 
   // コンビニ・商店のモード別演出(共有マテリアル、追加は最大2メッシュ+提灯インスタンス)
-  if (type === 'shop' && h <= 12) {
+  if (isShopLike && h <= 12) {
     if (MODE === 'edo') {
-      // 茶屋: 暖簾+提灯
+      // 茶屋: 暖簾+提灯(種別に関わらず江戸風に統一)
       dm(UNIT_PLANE, NOREN_MAT, x, gy + 1.7, z + d / 2 + 0.08, Math.min(w * 0.7, 6), 1.1, 1);
       poolAdd(lampP, x - Math.min(w, 8) * 0.35, gy + 2.2, z + d / 2 + 0.4, 0, 0.9, 1.2, 0.9, 0xff8830);
       poolAdd(lampP, x + Math.min(w, 8) * 0.35, gy + 2.2, z + d / 2 + 0.4, 0, 0.9, 1.2, 0.9, 0xff8830);
     } else {
       const bandMats = MODE === 'space' ? NEON_MATS : MODE === 'marchen' ? CANDY_BAND_MATS : SIGN_BAND_MATS;
       dm(UNIT_PLANE, STOREFRONT_MAT, x, gy + 1.1, z + d / 2 + 0.06, Math.min(w * 0.85, 10), 1.6, 1);
-      dm(UNIT_BOX, bandMats[(Math.random() * bandMats.length) | 0],
-                 x, gy + 2.4, z + d / 2 + 0.2, Math.min(w, 12) * 0.95, 0.7, 0.25);
+      // 現実モードでコンビニの実在チェーンを検出できた場合は、系統色の帯を使う(ロゴ・文字は使わない)
+      const band = (MODE === 'real' && style && style.bandColor != null) ? bandMat(style.bandColor)
+                 : bandMats[(Math.random() * bandMats.length) | 0];
+      dm(UNIT_BOX, band, x, gy + 2.4, z + d / 2 + 0.2, Math.min(w, 12) * 0.95, 0.7, 0.25);
+
+      // 現実モードのみ: レストラン/カフェ/ファストフードを特徴的な小物で描き分ける
+      if (MODE === 'real') {
+        if (type === 'restaurant') {
+          // 屋外テラス風のパラソル+小テーブル
+          dm(UNIT_CYL, lambertMat(0xd8d8d8), x + w * 0.3, gy + 1.4, z + d / 2 + 2.2, 0.08, 2.6, 0.08); // ポール
+          dm(UNIT_CONE8, lambertMat(0xcc3322), x + w * 0.3, gy + 2.7, z + d / 2 + 2.2, 1.8, 0.7, 1.8); // 傘
+          dm(UNIT_BOX, lambertMat(0xffffff), x + w * 0.3, gy + 0.75, z + d / 2 + 2.2, 0.8, 0.06, 0.8); // テーブル
+        } else if (type === 'cafe') {
+          // 窓上の縞オーニング(日除け)
+          const awn = dm(UNIT_BOX, lambertMat(0xb85c3a), x, gy + 2.0, z + d / 2 + 0.5, Math.min(w * 0.8, 8), 0.1, 1.1);
+          awn.rotation.x = -0.35;
+        } else if (type === 'fastfood') {
+          // ドライブスルー風のレーン屋根+メニューボード
+          const laneZ = z - d / 2 - 4;
+          dm(UNIT_BOX, lambertMat(0xcc2222), x + w * 0.2, gy + 3.2, laneZ, 3.2, 0.2, 5.5); // レーン屋根
+          dm(UNIT_CYL, lambertMat(0x888888), x + w * 0.2 - 1.4, gy + 1.6, laneZ, 0.12, 3.2, 0.12); // 支柱
+          dm(UNIT_CYL, lambertMat(0x888888), x + w * 0.2 + 1.4, gy + 1.6, laneZ, 0.12, 3.2, 0.12);
+          dm(UNIT_BOX, lambertMat(0x222222), x + w * 0.2, gy + 1.4, laneZ - 2, 1.2, 1.4, 0.15); // メニューボード
+        }
+      }
     }
   } else if (type === 'school') {
     // 校庭(土色の広場)
@@ -2172,8 +2263,90 @@ function decorateRoad(x1, z1, x2, z2, type, w) {
 // ======= STATION LANDMARKS =======
 const stationLabels = []; // for billboard update each frame
 
+// 駅名ラベル(キャンバステクスチャの看板)を作る。depthTest:falseなので地形・建物越しでも
+// 常に描画され、遠くからでも駅の場所がわかる(以前のファンタジー風ランドマークと同じ仕組み)。
+function makeStationLabel(x, z, y, name) {
+  const cvs = document.createElement('canvas');
+  cvs.width = 512; cvs.height = 96;
+  const ctx2d = cvs.getContext('2d');
+  ctx2d.fillStyle = 'rgba(20,10,0,0.85)';
+  ctx2d.fillRect(0, 0, 512, 96);
+  ctx2d.strokeStyle = '#ffcc00';
+  ctx2d.lineWidth = 4;
+  ctx2d.strokeRect(2, 2, 508, 92);
+  ctx2d.fillStyle = '#ffee44';
+  ctx2d.font = 'bold 52px sans-serif';
+  ctx2d.textAlign = 'center';
+  ctx2d.textBaseline = 'middle';
+  ctx2d.fillText(name, 256, 48);
+  const tex = new THREE.CanvasTexture(cvs);
+  const labelMesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(40, 8),
+    new THREE.MeshBasicMaterial({ map: tex, transparent: true, side: THREE.DoubleSide, depthTest: false })
+  );
+  labelMesh.position.set(x, y, z);
+  scene.add(labelMesh);
+  stationLabels.push({ type: 'label', mesh: labelMesh, x, z });
+}
+
 function addStation(x, z, name) {
   const gy = getGroundY(x, z); // 地表基準にしないと高地の駅ランドマークが埋まる
+
+  if (IS_REAL) {
+    // 現実モード: ファンタジー風の光る柱の代わりに、駅舎らしい建物を建てる。
+    // 【重要】OSMに実際の駅舎の建物ポリゴン(building=train_station等)があれば、
+    // 通常の建物処理パイプライン(getBuildingStyle)側で認識して実際の輪郭・高さで
+    // 別途生成される。ここで作るのは「駅ノード(点)に対して必ず用意する最低限の
+    // 駅舎ランドマーク」で、実データの有無に関わらず駅の目印として機能させる。
+    const stW = 16, stD = 9, stH = 5.5;
+    const wallMat = lambertMat(0xe8e2d0);
+    const roofMat = lambertMat(0x445266);
+    const body = new THREE.Mesh(new THREE.BoxGeometry(stW, stH, stD), wallMat);
+    body.position.set(x, gy + stH / 2, z);
+    body.renderOrder = 2;
+    scene.add(body);
+    detailMesh(PARAPET_GEO, roofMat, x, gy + stH, z, stW + 0.6, 0.8, stD + 0.6); // 陸屋根+パラペット
+    detailMesh(UNIT_BOX, roofMat, x, gy + stH + 0.1, z + stD / 2 + 1.4, stW * 0.7, 0.3, 2.8); // 出入口の庇
+    detailMesh(UNIT_PLANE, ENTRANCE_MAT, x, gy + stH * 0.55, z + stD / 2 + 0.05, stW * 0.55, stH * 0.5, 1); // 出入口ガラス
+
+    const light = new THREE.PointLight(0xffe0a0, 2.5, 250);
+    light.position.set(x, gy + stH + 3, z);
+    scene.add(light);
+
+    // 最寄りの線路に沿ってプラットホーム(両側)+上屋を置く
+    if (railSegs.length) {
+      let best = null, bd = 40 * 40;
+      for (const rs of railSegs) {
+        const mx = (rs.x1 + rs.x2) / 2, mz = (rs.z1 + rs.z2) / 2;
+        const dd = (mx - x) * (mx - x) + (mz - z) * (mz - z);
+        if (dd < bd) { bd = dd; best = rs; }
+      }
+      if (best) {
+        const ddx = best.x2 - best.x1, ddz = best.z2 - best.z1;
+        const dl = Math.hypot(ddx, ddz) || 1;
+        const rx = ddx / dl, rz = ddz / dl;
+        const ryr = Math.atan2(-rz, rx);
+        const pxp = -rz, pzp = rx;
+        const mx = (best.x1 + best.x2) / 2, mz = (best.z1 + best.z2) / 2;
+        for (const sd of [-1, 1]) {
+          const hx = mx + pxp * sd * 4.6, hz = mz + pzp * sd * 4.6;
+          const hgy = getGroundY(hx, hz);
+          detailMesh(UNIT_BOX, lambertMat(0x9c9c96), hx, hgy + 0.6, hz, 46, 1.2, 3.2, ryr); // ホーム
+          detailMesh(UNIT_BOX, lambertMat(0x50545a), hx, hgy + 3.6, hz, 42, 0.2, 3.0, ryr); // 上屋
+          for (const po of [-14, 14]) { // 上屋の支柱
+            detailMesh(UNIT_CYL, lambertMat(0x8a8d90), hx + rx * po, hgy + 2.4, hz + rz * po, 0.24, 2.4, 0.24);
+          }
+        }
+      }
+    }
+
+    // 駅名は駅舎の上に。以前の光る柱と同じくdepthTest:falseなので、建物や地形に
+    // 隠れず遠くからでも見える(高さだけ駅舎の規模に合わせて低くした)
+    makeStationLabel(x, z, gy + stH + 8, name);
+    return;
+  }
+
+  // ここから下は現実モード以外(江戸・メルヘン・宇宙など)向けのファンタジー風ランドマーク
   // Golden pillar(江戸=宿場の木塔 / メルヘン=ピンク / 宇宙=ネオン)
   const stC = MODE === 'edo'     ? { c: 0x8a6a40, e: 0xcc6600 }
             : MODE === 'marchen' ? { c: 0xffb0d0, e: 0xff70a0 }
@@ -2204,55 +2377,7 @@ function addStation(x, z, name) {
   light.position.set(x, gy + 53, z);
   scene.add(light);
 
-  // 現実モード: 最寄りの線路に沿ってプラットホーム(両側)+上屋を置く
-  if (IS_REAL && railSegs.length) {
-    let best = null, bd = 40 * 40;
-    for (const rs of railSegs) {
-      const mx = (rs.x1 + rs.x2) / 2, mz = (rs.z1 + rs.z2) / 2;
-      const dd = (mx - x) * (mx - x) + (mz - z) * (mz - z);
-      if (dd < bd) { bd = dd; best = rs; }
-    }
-    if (best) {
-      const ddx = best.x2 - best.x1, ddz = best.z2 - best.z1;
-      const dl = Math.hypot(ddx, ddz) || 1;
-      const rx = ddx / dl, rz = ddz / dl;
-      const ryr = Math.atan2(-rz, rx);
-      const pxp = -rz, pzp = rx;
-      const mx = (best.x1 + best.x2) / 2, mz = (best.z1 + best.z2) / 2;
-      for (const sd of [-1, 1]) {
-        const hx = mx + pxp * sd * 4.6, hz = mz + pzp * sd * 4.6;
-        const hgy = getGroundY(hx, hz);
-        detailMesh(UNIT_BOX, lambertMat(0x9c9c96), hx, hgy + 0.6, hz, 46, 1.2, 3.2, ryr); // ホーム
-        detailMesh(UNIT_BOX, lambertMat(0x50545a), hx, hgy + 3.6, hz, 42, 0.2, 3.0, ryr); // 上屋
-        for (const po of [-14, 14]) { // 上屋の支柱
-          detailMesh(UNIT_CYL, lambertMat(0x8a8d90), hx + rx * po, hgy + 2.4, hz + rz * po, 0.24, 2.4, 0.24);
-        }
-      }
-    }
-  }
-
-  // Name label (canvas texture billboard)
-  const cvs = document.createElement('canvas');
-  cvs.width = 512; cvs.height = 96;
-  const ctx2d = cvs.getContext('2d');
-  ctx2d.fillStyle = 'rgba(20,10,0,0.85)';
-  ctx2d.fillRect(0, 0, 512, 96);
-  ctx2d.strokeStyle = '#ffcc00';
-  ctx2d.lineWidth = 4;
-  ctx2d.strokeRect(2, 2, 508, 92);
-  ctx2d.fillStyle = '#ffee44';
-  ctx2d.font = 'bold 52px sans-serif';
-  ctx2d.textAlign = 'center';
-  ctx2d.textBaseline = 'middle';
-  ctx2d.fillText(name, 256, 48);
-  const tex = new THREE.CanvasTexture(cvs);
-  const labelMesh = new THREE.Mesh(
-    new THREE.PlaneGeometry(40, 8),
-    new THREE.MeshBasicMaterial({ map: tex, transparent: true, side: THREE.DoubleSide, depthTest: false })
-  );
-  labelMesh.position.set(x, gy + 62, z);
-  scene.add(labelMesh);
-  stationLabels.push({ type: 'label', mesh: labelMesh, x, z });
+  makeStationLabel(x, z, gy + 62, name);
 }
 
 // ======= OSM DATA LOADER =======
@@ -3196,9 +3321,8 @@ async function loadOSM(preFetchedData) {
       const w = Math.max(maxDx * 2, 2);
       const d = Math.max(maxDz * 2, 2);
 
-      const style = getBuildingStyle(tags);
-      const levels = parseInt(tags['building:levels']) || 1 + Math.floor(Math.random()*3);
-      const h = Math.max(levels * 3, 3) + Math.random()*2;
+      const h = resolveBuildingHeight(tags);
+      const style = classifyResidential(getBuildingStyle(tags), w, d, h);
       // 直接生成せず、タイル取得分と同じキューに積んでフレーム分割で生成する。
       // 【重要】以前はここで直接addBuildingしており、NEAR高解像度地形がまだ届く前に
       // 高さが焼き込まれてしまい、初期スポーン周辺の建物が浮く/埋まる主な原因になっていた。
@@ -3967,9 +4091,9 @@ function processTileData(data) {
     let maxDx=0, maxDz=0;
     pts.forEach(p => { maxDx=Math.max(maxDx,Math.abs(p.x-cx)); maxDz=Math.max(maxDz,Math.abs(p.z-cz)); });
     const w=Math.max(maxDx*2,2), d=Math.max(maxDz*2,2);
-    const style = getBuildingStyle(tags);
-    const levels = parseInt(tags['building:levels']) || 1+Math.floor(Math.random()*3);
-    pendingBuildings.push({ x: cx, z: cz, w, d, h: Math.max(levels*3,3)+Math.random()*2, style });
+    const h = resolveBuildingHeight(tags);
+    const style = classifyResidential(getBuildingStyle(tags), w, d, h);
+    pendingBuildings.push({ x: cx, z: cz, w, d, h, style });
   });
   // Landuse polygons for chunk system
   data.elements.forEach(el => {
@@ -4154,9 +4278,14 @@ function generateChunk(chunkX, chunkZ) {
   // ミニマップに細街路が網の目状にあるのに家が1軒も建たない(スカスカの主因)。
   // チャンク近傍の細街路(road/tertiary)の総延長が閾値以上なら住宅街とみなし、
   // landuse未登録でも回避ポリゴン(田畑・森・公園・水域)の外なら補完する。
-  // 山道など単独の1本道は延長が閾値に届かないので家は並ばない。
+  // 【重要】以前は「総延長」だけで判定していたため、農道など単独方向の道が
+  // 1本長く続くだけでも閾値を超えて住宅街扱いになり、空き地に家が建つ原因になっていた。
+  // 実際の住宅街は交差する街路(格子状)が特徴なので、方向のばらつきも条件に加える。
+  // また、近くに実際にlanduse=residentialのポリゴンがあれば、それも住宅街の根拠にする
+  // (チャンクが境界のすぐ外にあるだけで inLanduse が false になるケースの救済)。
   const nearMinor = [];
   let minorLen = 0;
+  const dirBuckets = new Set(); // 道の向き(180°周期を4分割)。2方向以上=交差=格子状とみなす
   // 【重要】以前はminimapRoads(取得済み全道路。増え続けて減らない)を毎回全件走査していた。
   // チャンク生成のたびに走る頻出パスなので空間ハッシュで近傍だけ拾う。
   for (const r of queryRoadGrid(x0 - 40, x1 + 40, z0 - 40, z1 + 40)) {
@@ -4165,10 +4294,18 @@ function generateChunk(chunkX, chunkZ) {
         Math.max(r.z1, r.z2) < z0 - 40 || Math.min(r.z1, r.z2) > z1 + 40) continue;
     nearMinor.push(r);
     const mx = (r.x1 + r.x2) / 2, mz = (r.z1 + r.z2) / 2;
-    if (mx >= x0 - 20 && mx < x1 + 20 && mz >= z0 - 20 && mz < z1 + 20)
+    if (mx >= x0 - 20 && mx < x1 + 20 && mz >= z0 - 20 && mz < z1 + 20) {
       minorLen += Math.min(CHUNK_SIZE, Math.hypot(r.x2 - r.x1, r.z2 - r.z1));
+      const ang = Math.atan2(r.z2 - r.z1, r.x2 - r.x1);
+      dirBuckets.add(Math.floor((((ang % Math.PI) + Math.PI) % Math.PI) / (Math.PI / 4)));
+    }
   }
-  const denseArea = minorLen >= 200; // 複数本ぶんの延長=網の目状
+  // 近くに実際のlanduse=residentialがあるか(半径300m。チャンク自体は境界外でも隣接なら救済)
+  const RESIDENTIAL_NEAR_R = 300;
+  const hasResidentialNearby = queryPolyGrid(landuseGrid,
+    x0 - RESIDENTIAL_NEAR_R, x1 + RESIDENTIAL_NEAR_R, z0 - RESIDENTIAL_NEAR_R, z1 + RESIDENTIAL_NEAR_R
+  ).some(p => p.lu === 'residential');
+  const denseArea = (minorLen >= 250 && dirBuckets.size >= 2) || hasResidentialNearby;
   const buildable = (qx, qz) => (denseArea || inLanduse(qx, qz)) && !inAvoid(qx, qz);
   // 細街路から maxD 以内か(奥地の空き野原まで埋めないためのガード)
   const nearMinorRoad = (qx, qz, maxD) => {
@@ -4233,8 +4370,10 @@ function generateChunk(chunkX, chunkZ) {
         // 住宅地はほぼ2階建て、たまに低層アパート(日本の郊外の実感に寄せる)
         const bh = isRes ? (Math.random() < 0.15 ? 8+Math.random()*6 : 4+Math.random()*3.5)
                  : isCom ? 8+Math.random()*16 : 6+Math.random()*8;
+        // 住宅地は「たまに低層アパート」の高さロールがマンション閾値を超えることがあるので、
+        // その場合は見た目もアパート扱いに昇格させる(house型のまま高いだけ、を避ける)
         const style = isRes
-          ? { color:0xc8a060, roofColor:0x8a5828, type:'house' }
+          ? classifyResidential({ color:0xc8a060, roofColor:0x8a5828, type:'house' }, bw, bd, bh)
           : isCom
           ? { color:0xf09050, roofColor:0xb05020, type:'shop' }
           : { color:0x909898, roofColor:0x606868, type:'industrial' };
@@ -4257,7 +4396,7 @@ function generateChunk(chunkX, chunkZ) {
         if (hasBuildingNearby(jx, jz, Math.max(bw, bd) / 2 + 1.5)) continue;
         const pal = HOUSE_PALETTE[(Math.random() * HOUSE_PALETTE.length) | 0];
         const bh = Math.random() < 0.12 ? 8 + Math.random() * 5 : 4 + Math.random() * 3.5;
-        addBuilding(jx, jz, bw, bd, bh, { color: pal.w, roofColor: pal.r, type: 'house' });
+        addBuilding(jx, jz, bw, bd, bh, classifyResidential({ color: pal.w, roofColor: pal.r, type: 'house' }, bw, bd, bh));
       }
     }
   }
