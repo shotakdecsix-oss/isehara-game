@@ -36,6 +36,19 @@ body { overflow:hidden; background:#000; font-family:'Segoe UI',sans-serif; }
   padding:10px 20px; font-size:13px;
   pointer-events:none; text-align:center;
 }
+/* 周辺の道路・建物データを取得/生成している間だけ出す小さな表示。
+   起動時の #status と違い常駐監視で、歩いている最中に「今読み込み中なのか、
+   本当に何もないエリアなのか」を区別できるようにする */
+#tileLoading {
+  position:fixed; top:16px; right:16px;
+  background:rgba(70,35,10,0.85); color:#ffcf80;
+  border:1px solid rgba(255,170,60,0.7); border-radius:8px;
+  padding:6px 12px; font-size:12px;
+  pointer-events:none; z-index:22;
+  text-shadow:0 0 6px rgba(255,170,60,0.6);
+  display:none;
+}
+#tileLoading.active { display:block; }
 /* Touch joystick */
 #joystick {
   position:fixed; bottom:100px; left:40px;
@@ -214,6 +227,7 @@ body.uiHidden #uiToggleBtn { opacity:0.45; }
   スマホ: 左スティック移動(倒すほど加速) / 右スワイプ回転 / ⤴ジャンプ
 </div>
 <div id="status">🗺 伊勢原マップ読み込み中...</div>
+<div id="tileLoading">⏳ 周辺データ読み込み中 LOADING...</div>
 <a id="gpsDisplay" href="#" target="_blank">📍 座標取得中...</a>
 <div id="minimap"><canvas id="minimapCanvas" width="200" height="200"></canvas></div>
 <div id="joystick"><div id="joystickKnob"></div></div>
@@ -1962,6 +1976,7 @@ function addStation(x, z, name) {
 
 // ======= OSM DATA LOADER =======
 const statusEl = document.getElementById('status');
+const tileLoadingEl = document.getElementById('tileLoading');
 // 初期スポーン: 神奈川県伊勢原市東成瀬2-2-11
 // (国土地理院ジオコーディング「東成瀬2番地」= 35.409103, 139.342331)
 const SPAWN_LAT = 35.409103, SPAWN_LON = 139.342331;
@@ -3327,7 +3342,12 @@ const loadedOSMTiles = new Set();    // 実際に処理が完了した(道路が
                                       // 「地形→道路→建物→木」の順を守るため、チャンクの
                                       // 建物生成はこれで判定してカバー範囲のタイルを待つ。
 const osmTileQueue = [];
-let osmTileFetching = false;
+// タイル取得の同時実行数。以前は1件ずつ完全直列だったため、ダッシュ(最大45m/s)で
+// 移動すると描写エリアの拡大がまったく追いつかず、未読み込みの端に突き当たっていた。
+// server/server.js のプロキシが上流(overpass-api.de)へのレート制限を既に一元管理して
+// いるので、クライアント側は複数タイルを並行にリクエストして問題ない。
+const OSM_TILE_CONCURRENCY = 4;
+let osmTileActiveCount = 0;
 const osmTileFailCount = new Map(); // タイルごとの失敗回数(3回まで再試行)
 // 【重要】標高データ+初期OSMのロード完了までタイル取得を止めるゲート。
 // 以前は起動直後からタイル取得が走り、標高ロード(約8秒)より先に完了した
@@ -3439,9 +3459,17 @@ function processTileData(data) {
   data.elements.forEach(el => { if (el.type === 'way') seenOSMWays.add(el.id); });
 }
 
-async function processOSMTileQueue() {
-  if (osmTileFetching || osmTileQueue.length === 0) return;
-  osmTileFetching = true;
+// キューに空きワーカー枠がある限り、並行してタイルを取得していく
+// (以前は1件処理→待機→次の1件、という完全直列で、高速移動時に描写エリアの
+//  拡大が追いつかなかった)
+function processOSMTileQueue() {
+  while (osmTileActiveCount < OSM_TILE_CONCURRENCY && osmTileQueue.length > 0) {
+    osmTileActiveCount++;
+    fetchOneOSMTile();
+  }
+}
+
+async function fetchOneOSMTile() {
   // プレイヤーに近いタイルを優先(以前はキュー投入順で、進行方向の
   // タイルが後回しになり目の前で道路が途切れたまま待たされていた)
   const ptx = player.position.x / OSM_TILE_M, ptz = player.position.z / OSM_TILE_M;
@@ -3467,17 +3495,31 @@ async function processOSMTileQueue() {
     osmTileFailCount.delete(key);
     loadedOSMTiles.add(key); // このタイルの道路が確定 → 建物生成待ちのチャンクを解放してよい
   } catch(e) {
-    // 以前は失敗タイルが fetchedOSMTiles に残ったまま二度と再試行されず、
-    // レート制限(429)等で永久に歯抜けになっていた → 3回まで再試行
+    // 以前は3回失敗すると完全に諦めて二度と再試行しなかったため、Overpassが一時的に
+    // 混雑していただけの場合でも「その区画だけ永久に道路が途切れる」ことがあった。
+    // → 諦めきらず、間隔を伸ばしながら背景でずっと再試行し続ける。
+    // (3回失敗した時点では建物生成だけ先に進めてよい扱いにし、後から道路が届いたら反映される)
     failed = true;
     const n = (osmTileFailCount.get(key) || 0) + 1;
     osmTileFailCount.set(key, n);
-    if (n < 4) fetchedOSMTiles.delete(key); // checkOSMTiles が再度キューに積む
-    else loadedOSMTiles.add(key); // 3回失敗して諦める場合も「確定」扱いにし、建物生成が永久に止まらないようにする
+    if (n >= 4) loadedOSMTiles.add(key); // これ以上は建物生成をブロックしない(道路は背景で取得を続ける)
+    fetchedOSMTiles.delete(key); // 常に再試行対象に戻す(checkOSMTiles が再度キューに積む)
   }
-  await new Promise(r => setTimeout(r, failed ? 6000 : 1500)); // 失敗時は長く待ってレート制限回復
-  osmTileFetching = false;
-  processOSMTileQueue();
+  // 失敗するたびに待ち時間を延ばす(最大30秒)。連続失敗中の無駄な連打を防ぎつつ、
+  // 一時的な混雑が収まれば自動的に復帰して歯抜けが埋まる。
+  // (成功時はプロキシ側で既にレート制限済みなので、このワーカーはすぐ次のタイルへ)
+  const n = osmTileFailCount.get(key) || 0;
+  await new Promise(r => setTimeout(r, failed ? Math.min(30000, 3000 * n) : 200));
+  osmTileActiveCount--;
+  processOSMTileQueue(); // この枠が空いたので、キューに残りがあれば次を拾う
+}
+
+// 道路・建物データを取得/生成している最中かどうかを画面右上に出す。
+// 「何もない」のか「まだ読み込み中」なのかをプレイヤーが区別できるようにするための表示。
+function updateLoadingIndicator() {
+  if (!tileLoadingEl) return;
+  const busy = osmTileActiveCount > 0 || osmTileQueue.length > 0 || chunkGenQueue.length > 0;
+  tileLoadingEl.classList.toggle('active', busy);
 }
 
 let _osmCheckFrame = 0;
@@ -3485,6 +3527,7 @@ let _osmLastPx = null, _osmLastPz = null;
 function checkOSMTiles() {
   if (!initialWorldLoaded) return; // 標高+初期OSMが揃うまで開始しない(高さ競合防止)
   _osmCheckFrame++;
+  updateLoadingIndicator(); // キューの増減はここで毎回チェック(~1/60秒ごと呼ばれる)
   if (_osmCheckFrame % 30 !== 0) return; // ~0.5秒ごと(移動中の追随を速める)
   const px = player.position.x, pz = player.position.z;
   // 明治: プレイヤー周辺の二次メッシュ土地利用データも必要に応じて追加取得
@@ -3515,7 +3558,7 @@ function checkOSMTiles() {
       for (let s = -1; s <= 1; s++)
         queueTile(px + (ux * k + perpx * s) * OSM_TILE_M, pz + (uz * k + perpz * s) * OSM_TILE_M);
   }
-  if (osmTileQueue.length > 0 && !osmTileFetching) processOSMTileQueue();
+  if (osmTileQueue.length > 0) processOSMTileQueue(); // 空きワーカー枠がある分だけ内部で処理される
 }
 
 // ======= CHUNK-BASED DYNAMIC BUILDING GENERATION =======
