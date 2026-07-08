@@ -1873,6 +1873,12 @@ function addRailXing(pt) {
 const MWY_H = 7, MWY_W = 16;
 // 高架(高速道路)の桁ジオメトリだけを作る部分。resnap(rebuildMotorwayMesh)からも
 // 同じ関数を使って再生成できるよう、addMotorwayから切り出した。
+// 【重要】以前は桁の高さを6mおきに個別サンプリング(見た目)、当たり判定は22m区間の
+// 端点のみ(=別のサンプリング密度)で決めていたため、両者が微妙にズレたり、区間ごとに
+// 別タイミングでresnapされた際に隣接区間との段差が生まれ、それが「高速道路上の見えない
+// 段差に動きをブロックされる」不具合の原因になっていた。桁は区間の両端点の高さだけを
+// 使って直線的に結ぶ(=途中の地形起伏は追わない)ことで、見た目・当たり判定が常に同じ
+// 1本の直線上に揃い、区間内・区間間のどちらでも段差が生じないようにする。
 function makeMotorwayGeo(x1, z1, x2, z2) {
   const dx = x2 - x1, dz = z2 - z1;
   const len = Math.hypot(dx, dz);
@@ -1880,6 +1886,7 @@ function makeMotorwayGeo(x1, z1, x2, z2) {
   const nx = dx / len, nz = dz / len, px = -nz, pz = nx;
   const hw2 = MWY_W / 2;
   const steps = Math.max(1, Math.round(len / 6));
+  const y1 = getGroundY(x1, z1) + MWY_H, y2 = getGroundY(x2, z2) + MWY_H;
   // 断面ストリップ: [横オフセットA, 高さA, uA, 横オフセットB, 高さB, uB]
   const strips = [
     [-hw2, 0,    0.02, +hw2, 0,    0.70], // 路面
@@ -1893,7 +1900,7 @@ function makeMotorwayGeo(x1, z1, x2, z2) {
   for (let i = 0; i <= steps; i++) {
     const t = i / steps;
     const cx = x1 + dx * t, cz = z1 + dz * t;
-    const y = getGroundY(cx, cz) + MWY_H;
+    const y = y1 + (y2 - y1) * t; // 端点間を直線的に結ぶ(区間内の地形起伏は追わない)
     const v = t * len;
     for (const s of strips) {
       P.push(cx + px * s[0], y + s[1], cz + pz * s[0], cx + px * s[3], y + s[4], cz + pz * s[3]);
@@ -1930,10 +1937,16 @@ function rebuildMotorwayMesh(r) {
   r.mesh.geometry.dispose();
   r.mesh.geometry = geo;
   if (r.slabBoxes) {
+    // 見た目(makeMotorwayGeo)と全く同じ2端点の直線補間で高さを出す(区間ごとの
+    // 個別サンプリングをやめ、見た目・当たり判定・隣接区間の全てを常に同じ直線に揃える)。
+    const y1 = getGroundY(r.x1, r.z1) + MWY_H, y2 = getGroundY(r.x2, r.z2) + MWY_H;
+    const len = Math.hypot(r.x2 - r.x1, r.z2 - r.z1) || 1;
     for (const sb of r.slabBoxes) {
-      const y = Math.min(getGroundY(sb.ax, sb.az), getGroundY(sb.bx, sb.bz)) + MWY_H;
+      const ta = sb.s / len, tb = sb.e / len;
+      const ya = y1 + (y2 - y1) * ta, yb = y1 + (y2 - y1) * tb;
+      const y = Math.min(ya, yb);
       sb.box.min.y = y - 0.25;
-      sb.box.max.y = y + 0.35;
+      sb.box.max.y = Math.max(ya, yb) + 0.35;
     }
   }
   // 橋脚(見た目・当たり判定とも)は挙動が不安定だったため廃止。高速道路は橋脚なしで空中に浮く形で表示する。
@@ -1954,18 +1967,21 @@ function addMotorway(x1, z1, x2, z2) {
   // 橋脚は見た目・当たり判定とも挙動が不安定(見えない当たり判定が動きをブロックする不具合)だったため廃止。
   // 高速道路は橋脚なしで空中に浮く形で表示する(桁上のスラブには引き続き乗れる)。
   // 桁上の床スラブ(22m刻みの薄い水平ボックス)。y範囲が桁の高さだけなので高架下の通行は妨げない。
-  // resnapできるよう区間の端点座標をslabBoxesに記録する。
+  // 高さは見た目(makeMotorwayGeo)と同じ「区間全体の2端点を直線で結ぶ」式で出す。
+  // resnapできるよう区間の始点/終点の「区間全体に対する距離(s,e)」をslabBoxesに記録する
+  // (座標ではなく距離で持つことで、resnap時にrebuildMotorwayMeshと全く同じ式で再計算できる)。
+  const y1 = getGroundY(x1, z1) + MWY_H, y2 = getGroundY(x2, z2) + MWY_H;
   const slabBoxes = [];
   for (let s = 0; s < len; s += 22) {
     const e = Math.min(len, s + 22);
     const ax = x1 + nx * s, az = z1 + nz * s, bx = x1 + nx * e, bz = z1 + nz * e;
-    const y = Math.min(getGroundY(ax, az), getGroundY(bx, bz)) + MWY_H;
+    const ya = y1 + (y2 - y1) * (s / len), yb = y1 + (y2 - y1) * (e / len);
     const cb = new THREE.Box3(
-      new THREE.Vector3(Math.min(ax, bx) - hw2, y - 0.25, Math.min(az, bz) - hw2),
-      new THREE.Vector3(Math.max(ax, bx) + hw2, y + 0.35, Math.max(az, bz) + hw2));
+      new THREE.Vector3(Math.min(ax, bx) - hw2, Math.min(ya, yb) - 0.25, Math.min(az, bz) - hw2),
+      new THREE.Vector3(Math.max(ax, bx) + hw2, Math.max(ya, yb) + 0.35, Math.max(az, bz) + hw2));
     cb.chunkKey = currentChunkKey;
     collisionBoxes.push(cb); collGridAdd(cb);
-    slabBoxes.push({ box: cb, ax, az, bx, bz });
+    slabBoxes.push({ box: cb, s, e });
   }
   // mesh・当たり判定の座標を記録し、NEAR地形更新時に桁と当たり判定を一緒に
   // 現在の地形高さへ作り直せるようにする(浮き/埋まり・判定ズレ対策)
