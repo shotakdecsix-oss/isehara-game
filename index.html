@@ -1485,6 +1485,27 @@ function getBuildingStyle(tags) {
   return style; // nullなら従来通りデフォルト紫のランダム
 }
 
+// ======= 建物の高さ・マンション判定(タグが曖昧でも大きさ・高さで見た目を識別可能にする) =======
+// building:height(実測m)を最優先、無ければbuilding:levels*3、どちらも無ければ既存通りランダム。
+function resolveBuildingHeight(tags) {
+  const hTag = parseFloat(tags['building:height']);
+  if (Number.isFinite(hTag) && hTag > 0) return hTag;
+  const levels = parseInt(tags['building:levels']);
+  if (Number.isFinite(levels) && levels > 0) return Math.max(levels * 3, 3);
+  return null; // タグから決められない → 呼び出し元の既存ランダム式にフォールバック
+}
+const APT_HEIGHT_M = 10;      // これ以上の高さは一戸建てタグでもマンション扱いにする
+const APT_FOOTPRINT_M2 = 200; // これ以上のフットプリント面積も同様
+const APARTMENT_STYLE = { color: 0x90a0c0, roofColor: 0x506080, emissive: 0x001122, type: 'apartment' };
+// 「高さ・階数・フットプリント面積がある閾値を超えたらタグに関わらずマンション扱いにする」ルール。
+// house/defaultタイプ(=タグが曖昧、または一戸建てタグだが実際は大きい)だけを対象にする。
+function classifyResidential(style, w, d, h) {
+  if (!style) return style;
+  if (style.type !== 'house' && style.type !== 'default') return style;
+  if (h >= APT_HEIGHT_M || w * d >= APT_FOOTPRINT_M2) return APARTMENT_STYLE;
+  return style;
+}
+
 function addBuilding(x, z, w, d, h, style) {
   const _origH = h; // 遠方アンロード時、再生成できるよう元のhを覚えておく(下でhを斜面ぶん延長するため)
   // 4隅+中心の地形高さを見て、最低点を基礎にし最高点まで胴体を延長。
@@ -3288,9 +3309,11 @@ async function loadOSM(preFetchedData) {
       const w = Math.max(maxDx * 2, 2);
       const d = Math.max(maxDz * 2, 2);
 
-      const style = getBuildingStyle(tags);
+      let style = getBuildingStyle(tags);
+      const resolvedH = resolveBuildingHeight(tags);
       const levels = parseInt(tags['building:levels']) || 1 + Math.floor(Math.random()*3);
-      const h = Math.max(levels * 3, 3) + Math.random()*2;
+      const h = resolvedH != null ? resolvedH : Math.max(levels * 3, 3) + Math.random()*2;
+      style = classifyResidential(style, w, d, h);
       // 直接生成せず、タイル取得分と同じキューに積んでフレーム分割で生成する。
       // 【重要】以前はここで直接addBuildingしており、NEAR高解像度地形がまだ届く前に
       // 高さが焼き込まれてしまい、初期スポーン周辺の建物が浮く/埋まる主な原因になっていた。
@@ -4073,9 +4096,12 @@ function processTileData(data) {
     let maxDx=0, maxDz=0;
     pts.forEach(p => { maxDx=Math.max(maxDx,Math.abs(p.x-cx)); maxDz=Math.max(maxDz,Math.abs(p.z-cz)); });
     const w=Math.max(maxDx*2,2), d=Math.max(maxDz*2,2);
-    const style = getBuildingStyle(tags);
+    let style = getBuildingStyle(tags);
+    const resolvedH = resolveBuildingHeight(tags);
     const levels = parseInt(tags['building:levels']) || 1+Math.floor(Math.random()*3);
-    pendingBuildings.push({ x: cx, z: cz, w, d, h: Math.max(levels*3,3)+Math.random()*2, style });
+    const h = resolvedH != null ? resolvedH : Math.max(levels*3,3)+Math.random()*2;
+    style = classifyResidential(style, w, d, h);
+    pendingBuildings.push({ x: cx, z: cz, w, d, h, style });
   });
   // Landuse polygons for chunk system
   data.elements.forEach(el => {
@@ -4263,6 +4289,9 @@ function generateChunk(chunkX, chunkZ) {
   // 山道など単独の1本道は延長が閾値に届かないので家は並ばない。
   const nearMinor = [];
   let minorLen = 0;
+  // 単純な1本道の延長(山道など)を住宅街と誤認しないよう、道の向き(180°を4分割)も見て、
+  // 実際に格子状(=複数方向の道が交差)になっている場合だけ密集地とみなす。
+  const dirBuckets = new Set();
   // 【重要】以前はminimapRoads(取得済み全道路。増え続けて減らない)を毎回全件走査していた。
   // チャンク生成のたびに走る頻出パスなので空間ハッシュで近傍だけ拾う。
   for (const r of queryRoadGrid(x0 - 40, x1 + 40, z0 - 40, z1 + 40)) {
@@ -4271,10 +4300,23 @@ function generateChunk(chunkX, chunkZ) {
         Math.max(r.z1, r.z2) < z0 - 40 || Math.min(r.z1, r.z2) > z1 + 40) continue;
     nearMinor.push(r);
     const mx = (r.x1 + r.x2) / 2, mz = (r.z1 + r.z2) / 2;
-    if (mx >= x0 - 20 && mx < x1 + 20 && mz >= z0 - 20 && mz < z1 + 20)
+    if (mx >= x0 - 20 && mx < x1 + 20 && mz >= z0 - 20 && mz < z1 + 20) {
       minorLen += Math.min(CHUNK_SIZE, Math.hypot(r.x2 - r.x1, r.z2 - r.z1));
+      let ang = Math.atan2(r.z2 - r.z1, r.x2 - r.x1);
+      if (ang < 0) ang += Math.PI; // 向きは180°で一周(逆向きは同じ道なり)
+      dirBuckets.add(Math.min(3, Math.floor(ang / (Math.PI / 4))));
+    }
   }
-  const denseArea = minorLen >= 200; // 複数本ぶんの延長=網の目状
+  // 近隣(300m以内)に既知のlanduse=residentialがあれば、密度条件を満たさなくても住宅街とみなす
+  // (住宅地の縁で細街路がまだ疎な場合の取りこぼし対策)。
+  const cx0 = (x0 + x1) / 2, cz0 = (z0 + z1) / 2;
+  let hasResidentialNearby = false;
+  for (const p of queryPolyGrid(landuseGrid, cx0 - 300, cx0 + 300, cz0 - 300, cz0 + 300)) {
+    if (p.lu === 'residential') { hasResidentialNearby = true; break; }
+  }
+  // 単純な1本道の延長では住宅街と誤認しないよう、格子状(2方向以上)であることも要求する。
+  // 閾値も200→250に引き上げ、判定を厳しくした。
+  const denseArea = (minorLen >= 250 && dirBuckets.size >= 2) || hasResidentialNearby;
   const buildable = (qx, qz) => (denseArea || inLanduse(qx, qz)) && !inAvoid(qx, qz);
   // 細街路から maxD 以内か(奥地の空き野原まで埋めないためのガード)
   const nearMinorRoad = (qx, qz, maxD) => {
@@ -4339,11 +4381,12 @@ function generateChunk(chunkX, chunkZ) {
         // 住宅地はほぼ2階建て、たまに低層アパート(日本の郊外の実感に寄せる)
         const bh = isRes ? (Math.random() < 0.15 ? 8+Math.random()*6 : 4+Math.random()*3.5)
                  : isCom ? 8+Math.random()*16 : 6+Math.random()*8;
-        const style = isRes
+        let style = isRes
           ? { color:0xc8a060, roofColor:0x8a5828, type:'house' }
           : isCom
           ? { color:0xf09050, roofColor:0xb05020, type:'shop' }
           : { color:0x909898, roofColor:0x606868, type:'industrial' };
+        style = classifyResidential(style, bw, bd, bh); // 高さ・面積が閾値超えならマンション扱いに
         addBuilding(jx, jz, bw, bd, bh, style);
       }
     }
@@ -4363,7 +4406,8 @@ function generateChunk(chunkX, chunkZ) {
         if (hasBuildingNearby(jx, jz, Math.max(bw, bd) / 2 + 1.5)) continue;
         const pal = HOUSE_PALETTE[(Math.random() * HOUSE_PALETTE.length) | 0];
         const bh = Math.random() < 0.12 ? 8 + Math.random() * 5 : 4 + Math.random() * 3.5;
-        addBuilding(jx, jz, bw, bd, bh, { color: pal.w, roofColor: pal.r, type: 'house' });
+        const style = classifyResidential({ color: pal.w, roofColor: pal.r, type: 'house' }, bw, bd, bh);
+        addBuilding(jx, jz, bw, bd, bh, style);
       }
     }
   }
