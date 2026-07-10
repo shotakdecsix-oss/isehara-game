@@ -2515,7 +2515,7 @@ function latLonToXZ(lat, lon) {
 // ======= 面フィーチャ(公園・水域・田畑・森) =======
 const avoidPolygons = []; // 手続き生成の建物を建ててはいけない領域
 const avoidGrid = new Map(); // polyGridAdd/queryPolyGridで使う空間ハッシュ(全件走査を避ける)
-const areaPolyBudget = { park: 80, water: 80, farm: 250 }; // 面メッシュのドローコール予算
+const areaPolyBudget = { park: 80, water: 80, farm: 250, campus: 60 }; // 面メッシュのドローコール予算
 const lawnMat  = new THREE.MeshLambertMaterial({ color: MODE_CONF.lawn, side: THREE.DoubleSide });
 // リボン(ROAD_MAT.water)と同じMeshBasicにして、重なっても境目が見えないようにする
 const waterAreaMat = new THREE.MeshBasicMaterial({ color: MODE_CONF.water, side: THREE.DoubleSide });
@@ -2757,7 +2757,9 @@ function handleAreaFeature(el) {
   const isPark   = tags.leisure === 'park' || tags.leisure === 'garden' || tags.leisure === 'playground';
   const isFarm   = ['farmland','farm','orchard','meadow','allotments','vineyard'].includes(lu);
   const isForest = lu === 'forest' || tags.natural === 'wood';
-  if (!isPark && !isWater && !isFarm && !isForest) return false;
+  // 学校・大学・病院の敷地全体(構内に手続き生成の家を建てさせないための回避ゾーン)
+  const isCampus = ['school','university','college','hospital'].includes(tags.amenity || '');
+  if (!isPark && !isWater && !isFarm && !isForest && !isCampus) return false;
   const pts = el.geometry.map(g => latLonToXZ(g.lat, g.lon));
   let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
   pts.forEach(p => { minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minZ = Math.min(minZ, p.z); maxZ = Math.max(maxZ, p.z); });
@@ -2793,6 +2795,8 @@ function handleAreaFeature(el) {
     if (span >= 15 && span < 500 && areaPolyBudget.farm-- > 0) buildAreaPoly(pts, farmMat, 0.1);
   } else if (isForest) {
     scatterTreesIn(poly, 380, 70);
+  } else if (isCampus) {
+    if (span < 500 && areaPolyBudget.campus-- > 0) buildAreaPoly(pts, YARD_MAT, 0.13);
   }
   return true;
 }
@@ -4274,6 +4278,8 @@ const OSM_TILE_CLAUSES = [
   'node["railway"="station"]',
   'node["railway"="halt"]',
   'node["public_transport"="station"]',
+  // 学校・大学・病院の敷地(校庭・構内に手続き生成の家を置かないための回避ゾーン用)
+  'way["amenity"~"school|university|college|hospital"]',
 ];
 // 1リクエストにまとめる最大タイル数。スポーン直後・地図ジャンプ直後・急旋回時は
 // 一度に何十枚も新規タイルが必要になるが、Overpassは1ホスト1.1秒間隔の直列制限
