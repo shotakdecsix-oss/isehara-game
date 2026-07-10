@@ -772,7 +772,7 @@ function unloadFarBuildings() {
     removeIds.add(rec.bid);
     buildingRecords.splice(i, 1);
     // 再訪時に復元できるよう、軽量な記述だけキューへ戻す
-    pendingBuildings.push({ x: rec.x, z: rec.z, w: rec.w, d: rec.d, h: rec.h, style: rec.style });
+    pendingBuildings.push({ x: rec.x, z: rec.z, w: rec.w, d: rec.d, h: rec.h, style: rec.style, real: rec.real });
   }
   if (removeIds.size === 0) return;
   collisionBoxes = collisionBoxes.filter(b => !removeIds.has(b.buildingId));
@@ -807,6 +807,25 @@ function hasBuildingNearby(cx, cz, minDist) {
   for (const b of placedBuildings) {
     const dx=cx-b.x, dz=cz-b.z;
     if (dx*dx+dz*dz < d2) return true;
+  }
+  return false;
+}
+
+// 「本物のOSM建物」が近くに実在するか(手続き生成分は含まない)。
+// 農地・山道の道グリッドを住宅街と誤認する対策(denseAreaの裏付け条件に使う)。
+// 家並みが実在するエリアなら、landuseタグが無くても実OSM建物が既にいくつか立っている。
+function hasRealBuildingNearby(cx, cz, dist) {
+  const d2 = dist * dist;
+  const gx0 = Math.floor((cx - dist) / BUILDING_CELL), gx1 = Math.floor((cx + dist) / BUILDING_CELL);
+  const gz0 = Math.floor((cz - dist) / BUILDING_CELL), gz1 = Math.floor((cz + dist) / BUILDING_CELL);
+  for (let gx = gx0; gx <= gx1; gx++) for (let gz = gz0; gz <= gz1; gz++) {
+    const arr = buildingGrid.get(gx + ',' + gz);
+    if (!arr) continue;
+    for (const rec of arr) {
+      if (!rec.real) continue;
+      const dx = rec.x - cx, dz = rec.z - cz;
+      if (dx*dx + dz*dz < d2) return true;
+    }
   }
   return false;
 }
@@ -1533,7 +1552,7 @@ function applySizeFloor(style, w, d, h) {
   return { w: Math.max(w, f.w), d: Math.max(d, f.d), h: Math.max(h, f.h) };
 }
 
-function addBuilding(x, z, w, d, h, style) {
+function addBuilding(x, z, w, d, h, style, isReal) {
   const _origH = h; // 遠方アンロード時、再生成できるよう元のhを覚えておく(下でhを斜面ぶん延長するため)
   // 4隅+中心の地形高さを見て、最低点を基礎にし最高点まで胴体を延長。
   // (中心1点だけだと斜面で山側が埋まり、谷側が浮いていた)
@@ -1778,7 +1797,9 @@ function addBuilding(x, z, w, d, h, style) {
 
   // resnap用の記録(地形が後から更新された時にこのbuilding一式をY方向へ平行移動する)。
   // h/styleも保持しておき、遠方アンロード時にpendingBuildingsへ戻して再訪時に再生成できるようにする。
-  const brec = { x, z, w, d, h: _origH, style, gy, parts, cbox, ck: currentChunkKey, bid };
+  // isReal: 実OSM建物かどうか(手続き生成の密集地判定で「本物の建物が近くにあるか」の
+  // 裏付けに使う。農地の農道グリッドを住宅街と誤認する対策)
+  const brec = { x, z, w, d, h: _origH, style, gy, parts, cbox, ck: currentChunkKey, bid, real: !!isReal };
   buildingRecords.push(brec);
   buildingGridAdd(brec);
 }
@@ -3422,7 +3443,7 @@ async function loadOSM(preFetchedData) {
       // 【重要】以前はここで直接addBuildingしており、NEAR高解像度地形がまだ届く前に
       // 高さが焼き込まれてしまい、初期スポーン周辺の建物が浮く/埋まる主な原因になっていた。
       // isOnRoad判定はキュー投入時ではなく、他の建物と同じくフレーム分割の生成時に行う。
-      pendingBuildings.push({ x: cx, z: cz, w: fw, d: fd, h: fh, style });
+      pendingBuildings.push({ x: cx, z: cz, w: fw, d: fd, h: fh, style, real: true });
       buildingCount++;
     }
   });
@@ -4208,7 +4229,7 @@ function processTileData(data) {
     style = classifyResidential(style, w, d, h);
     let fw = w, fd = d, fh = h;
     ({ w: fw, d: fd, h: fh } = applySizeFloor(style, w, d, h)); // マンション・工場は最低サイズを底上げ
-    pendingBuildings.push({ x: cx, z: cz, w: fw, d: fd, h: fh, style });
+    pendingBuildings.push({ x: cx, z: cz, w: fw, d: fd, h: fh, style, real: true });
   });
   // Landuse polygons for chunk system
   data.elements.forEach(el => {
@@ -4423,7 +4444,12 @@ function generateChunk(chunkX, chunkZ) {
   }
   // 単純な1本道の延長では住宅街と誤認しないよう、格子状(2方向以上)であることも要求する。
   // 閾値も200→250に引き上げ、判定を厳しくした。
-  const denseArea = (minorLen >= 250 && dirBuckets.size >= 2) || hasResidentialNearby;
+  // さらに、道路グリッドだけでは農地の農道(格子状に見える畦道)を住宅街と誤認するため、
+  // landuse=residentialが近くにある「か」実OSM建物(手続き生成でない本物)が近くに
+  // 実在するかのどちらかを裏付けとして要求する(道の形だけでは家を建てさせない)。
+  const roadGridLooksResidential = minorLen >= 250 && dirBuckets.size >= 2 &&
+    hasRealBuildingNearby(cx0, cz0, 150);
+  const denseArea = hasResidentialNearby || roadGridLooksResidential;
   const buildable = (qx, qz) => (denseArea || inLanduse(qx, qz)) && !inAvoid(qx, qz);
   // 細街路から maxD 以内か(奥地の空き野原まで埋めないためのガード)
   const nearMinorRoad = (qx, qz, maxD) => {
@@ -4923,7 +4949,7 @@ function animate() {
       // 諦めてFAR基準のまま生成する(無限に足踏みし続けるのを防ぐ)。
       if (b._tries < 200) { pendingBuildings.push(b); continue; }
     }
-    if (!isOnRoad(b.x, b.z, b.w, b.d)) addBuilding(b.x, b.z, b.w, b.d, b.h, b.style);
+    if (!isOnRoad(b.x, b.z, b.w, b.d)) addBuilding(b.x, b.z, b.w, b.d, b.h, b.style, b.real);
   }
   if (pendingBuildingIdx > 0 && pendingBuildingIdx === pendingBuildings.length) {
     pendingBuildings.length = 0; pendingBuildingIdx = 0;
