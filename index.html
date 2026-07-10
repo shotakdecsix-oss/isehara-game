@@ -871,8 +871,11 @@ player.add(orbLight);
 player.position.set(0, 0, 0);
 
 // ======= BUILDING MATERIAL =======
-// スタイル不明のOSM建物の壁色(現実モード=幻想紫のまま。窓はファサードテクスチャで表現)
+// スタイル不明のOSM建物の壁色(江戸・メルヘン・宇宙モードは幻想紫のまま。窓はファサードテクスチャで表現)
 const DEFAULT_WALLS = [0x9a7acc, 0x8a6ab8, 0xaa80d8, 0x9880c8];
+// 現実モード用: building=yesだけ等でタグから種別不明な建物は、紫だと明らかに浮くので
+// 日本の街並みでよくある外壁トーン(生成りグレー・ベージュ系)を使う
+const DEFAULT_WALLS_REAL = [0xd8d0c0, 0xc8c8c0, 0xe0d8c8, 0xb8b8b0, 0xd0c8b0, 0xc0bcb0];
 
 // マテリアルキャッシュ — 建物ごとに new していたのを同色で共有し、
 // チャンク生成でマテリアルが無限増殖するのを防ぐ
@@ -1506,6 +1509,30 @@ function classifyResidential(style, w, d, h) {
   return style;
 }
 
+// 学校・病院・役場・神社仏閣は街の目印として際立つべきだが、OSMに高さ/階数タグが
+// 無いと既存のランダム式(3〜11m程度)で低く埋もれてしまう。種別が判明しているものだけ
+// 最低高さを底上げする(タグの実測値がある場合はresolveBuildingHeightの値を尊重=縮めない)。
+const LANDMARK_MIN_H = { school: 7, hospital: 9, government: 8, shrine: 6, temple: 7 };
+function applyLandmarkMinHeight(style, h) {
+  if (!style) return h;
+  const min = LANDMARK_MIN_H[style.type];
+  return min ? Math.max(h, min) : h;
+}
+
+// マンション・工場は一戸建てよりはっきり大きく見えるべき。タグ欠落時のランダム
+// 高さ/フットプリントが小さすぎて一戸建てと見分けがつかないケースの最低サイズ底上げ
+// (実測タグ由来の大きい建物はMath.maxなので縮まない)。
+const SIZE_FLOOR = {
+  apartment:  { w: 15, d: 12, h: 12 },
+  industrial: { w: 20, d: 16, h: 8  },
+};
+function applySizeFloor(style, w, d, h) {
+  if (!style) return { w, d, h };
+  const f = SIZE_FLOOR[style.type];
+  if (!f) return { w, d, h };
+  return { w: Math.max(w, f.w), d: Math.max(d, f.d), h: Math.max(h, f.h) };
+}
+
 function addBuilding(x, z, w, d, h, style) {
   const _origH = h; // 遠方アンロード時、再生成できるよう元のhを覚えておく(下でhを斜面ぶん延長するため)
   // 4隅+中心の地形高さを見て、最低点を基礎にし最高点まで胴体を延長。
@@ -1543,6 +1570,8 @@ function addBuilding(x, z, w, d, h, style) {
     wallC = SPACE_WALLS[(Math.random() * SPACE_WALLS.length) | 0]; // 金属
   } else if (style && style.color != null) {
     wallC = style.color;
+  } else if (MODE === 'real') {
+    wallC = DEFAULT_WALLS_REAL[(Math.random() * DEFAULT_WALLS_REAL.length) | 0];
   } else {
     wallC = DEFAULT_WALLS[(Math.random() * DEFAULT_WALLS.length) | 0];
   }
@@ -1662,6 +1691,12 @@ function addBuilding(x, z, w, d, h, style) {
           dm(UNIT_BOX, AC_MAT, x - w * 0.2, gy + h + 0.5, z - d * 0.15, 1.8, 1.0, 1.2, Math.random() * 3);
         if (Math.random() < 0.35)
           dm(UNIT_CYL, lambertMat(0x888888), x - w * 0.05, gy + h + 2, z + d * 0.2, 0.1, 4, 0.1);
+      }
+      // 工場: 遠くからでも「工場」と分かるよう煙突を1本立てる(白/赤の縞、屋根より確実に高い)
+      if (type === 'industrial') {
+        const chH = h * 0.9 + 4;
+        dm(UNIT_CYL, lambertMat(0xd8d8d0), x - w * 0.32, gy + h + chH / 2, z - d * 0.28, 1.3, chH, 1.3);
+        dm(UNIT_CYL, lambertMat(0xcc3322), x - w * 0.32, gy + h + chH - 0.6, z - d * 0.28, 1.34, 1.2, 1.34);
       }
     } else {
       // 勾配屋根: タグがあれば形状を確定、無ければ従来通り切妻50%/寄棟35%/片流れ15%のランダム
@@ -2359,7 +2394,7 @@ function addStation(x, z, name) {
     light.position.set(entX - px * 3, sgy + bh * 0.6, entZ - pz * 3);
     scene.add(light);
 
-    labelY = sgy + bh + 3.2; // 駅名看板は駅舎の屋上付近に
+    labelY = sgy + 30; // 駅名看板は遠くからでも目立つよう駅舎の上空に浮かせる
   } else {
     // ===== 従来のファンタジー演出(江戸・メルヘン・宇宙モード) =====
     const stC = MODE === 'edo'     ? { c: 0x8a6a40, e: 0xcc6600 }
@@ -3378,13 +3413,16 @@ async function loadOSM(preFetchedData) {
       let style = getBuildingStyle(tags);
       const resolvedH = resolveBuildingHeight(tags);
       const levels = parseInt(tags['building:levels']) || 1 + Math.floor(Math.random()*3);
-      const h = resolvedH != null ? resolvedH : Math.max(levels * 3, 3) + Math.random()*2;
+      let h = resolvedH != null ? resolvedH : Math.max(levels * 3, 3) + Math.random()*2;
+      h = applyLandmarkMinHeight(style, h); // 学校・病院・役場・神社仏閣は最低限の高さを確保
       style = classifyResidential(style, w, d, h);
+      let fw = w, fd = d, fh = h;
+      ({ w: fw, d: fd, h: fh } = applySizeFloor(style, w, d, h)); // マンション・工場は最低サイズを底上げ
       // 直接生成せず、タイル取得分と同じキューに積んでフレーム分割で生成する。
       // 【重要】以前はここで直接addBuildingしており、NEAR高解像度地形がまだ届く前に
       // 高さが焼き込まれてしまい、初期スポーン周辺の建物が浮く/埋まる主な原因になっていた。
       // isOnRoad判定はキュー投入時ではなく、他の建物と同じくフレーム分割の生成時に行う。
-      pendingBuildings.push({ x: cx, z: cz, w, d, h, style });
+      pendingBuildings.push({ x: cx, z: cz, w: fw, d: fd, h: fh, style });
       buildingCount++;
     }
   });
@@ -4165,9 +4203,12 @@ function processTileData(data) {
     let style = getBuildingStyle(tags);
     const resolvedH = resolveBuildingHeight(tags);
     const levels = parseInt(tags['building:levels']) || 1+Math.floor(Math.random()*3);
-    const h = resolvedH != null ? resolvedH : Math.max(levels*3,3)+Math.random()*2;
+    let h = resolvedH != null ? resolvedH : Math.max(levels*3,3)+Math.random()*2;
+    h = applyLandmarkMinHeight(style, h); // 学校・病院・役場・神社仏閣は最低限の高さを確保
     style = classifyResidential(style, w, d, h);
-    pendingBuildings.push({ x: cx, z: cz, w, d, h, style });
+    let fw = w, fd = d, fh = h;
+    ({ w: fw, d: fd, h: fh } = applySizeFloor(style, w, d, h)); // マンション・工場は最低サイズを底上げ
+    pendingBuildings.push({ x: cx, z: cz, w: fw, d: fd, h: fh, style });
   });
   // Landuse polygons for chunk system
   data.elements.forEach(el => {
@@ -4453,7 +4494,8 @@ function generateChunk(chunkX, chunkZ) {
           ? { color:0xf09050, roofColor:0xb05020, type:'shop' }
           : { color:0x909898, roofColor:0x606868, type:'industrial' };
         style = classifyResidential(style, bw, bd, bh); // 高さ・面積が閾値超えならマンション扱いに
-        addBuilding(jx, jz, bw, bd, bh, style);
+        const _f1 = applySizeFloor(style, bw, bd, bh); // マンション・工場は最低サイズを底上げ
+        addBuilding(jx, jz, _f1.w, _f1.d, _f1.h, style);
       }
     }
   }
@@ -4473,7 +4515,8 @@ function generateChunk(chunkX, chunkZ) {
         const pal = HOUSE_PALETTE[(Math.random() * HOUSE_PALETTE.length) | 0];
         const bh = Math.random() < 0.12 ? 8 + Math.random() * 5 : 4 + Math.random() * 3.5;
         const style = classifyResidential({ color: pal.w, roofColor: pal.r, type: 'house' }, bw, bd, bh);
-        addBuilding(jx, jz, bw, bd, bh, style);
+        const _f2 = applySizeFloor(style, bw, bd, bh); // マンションになったら最低サイズを底上げ
+        addBuilding(jx, jz, _f2.w, _f2.d, _f2.h, style);
       }
     }
   }
