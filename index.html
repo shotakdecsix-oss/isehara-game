@@ -939,11 +939,13 @@ function hasRealHouseNearby(cx, cz, dist) {
   return false;
 }
 
-// ======= PLAYER CHARACTER (少年/少女 選択可・魔法使い風) =======
+// ======= PLAYER CHARACTER (少年/少女 選択可・普通の格好) =======
+// 以前は魔法使い風(とんがり帽子・マント・杖・光る玉)だったが、素朴な少年/少女の
+// 見た目に変更した(マント・杖・光る玉は削除、帽子は少年の短い髪に置き換え)。
 const player = new THREE.Group();
 scene.add(player);
 
-// Body (tunic) — 以前は足元まで届く長いローブで脚が隠れていたため、歩く/走るアニメーションを
+// Body (シャツ) — 以前は足元まで届く長いローブで脚が隠れていたため、歩く/走るアニメーションを
 // 見せられるよう丈を短くし、下に独立した脚パーツを追加した。
 const bodyMat = new THREE.MeshLambertMaterial({ color: 0x3020a0 });
 const body = new THREE.Mesh(new THREE.CylinderGeometry(0.30, 0.40, 0.9, 8), bodyMat);
@@ -976,13 +978,14 @@ head.position.y = 1.65;
 head.castShadow = true;
 player.add(head);
 
-// Hat(少年)
-const hatMat = new THREE.MeshLambertMaterial({ color: 0x1a0a50 });
-const hatBrim = new THREE.Mesh(new THREE.CylinderGeometry(0.42, 0.42, 0.07, 12), hatMat);
-hatBrim.position.y = 1.9;
+// Hair(少年) — 短い髪(帽子ではなく地毛)
+const hatMat = new THREE.MeshLambertMaterial({ color: 0x2a1c10 });
+const hatBrim = new THREE.Mesh(new THREE.SphereGeometry(0.30, 12, 8, 0, Math.PI * 2, 0, Math.PI * 0.55), hatMat);
+hatBrim.position.y = 1.68;
 player.add(hatBrim);
-const hatTop = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.38, 0.6, 12), hatMat);
-hatTop.position.y = 2.22;
+const hatTop = new THREE.Mesh(new THREE.SphereGeometry(0.12, 8, 6), hatMat); // 前髪の房アクセント
+hatTop.position.set(0, 1.83, 0.22);
+hatTop.scale.set(1, 0.7, 0.8);
 player.add(hatTop);
 
 // Hair(少女) — 帽子の代わりにツインテールの髪型。既定では非表示(setCharacterSexで切替)
@@ -1000,14 +1003,6 @@ girlPonyR.position.set(0.32, 1.45, 0.02);
 girlPonyR.rotation.z = -0.35;
 player.add(girlPonyR);
 
-// Cape
-const capeMat = new THREE.MeshLambertMaterial({ color: 0xc0001a, side: THREE.DoubleSide });
-const capeGeo = new THREE.PlaneGeometry(0.9, 1.2);
-const cape = new THREE.Mesh(capeGeo, capeMat);
-cape.position.set(0, 1.05, -0.32);
-cape.castShadow = true;
-player.add(cape);
-
 // Arms
 const armMat = new THREE.MeshLambertMaterial({ color: 0x2818a0 });
 const leftArm = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 0.7, 8), armMat);
@@ -1016,19 +1011,6 @@ player.add(leftArm);
 const rightArm = leftArm.clone();
 rightArm.position.set(0.42, 1.15, 0);
 player.add(rightArm);
-
-// Staff
-const staffMat = new THREE.MeshLambertMaterial({ color: 0x8b5e2a });
-const staff = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 2.2, 8), staffMat);
-staff.position.set(0.55, 1.1, 0);
-player.add(staff);
-const orbMat = new THREE.MeshLambertMaterial({ color: 0x80ffff, emissive: 0x40c0ff, emissiveIntensity: 1.5 });
-const orb = new THREE.Mesh(new THREE.SphereGeometry(0.14, 10, 10), orbMat);
-orb.position.set(0.55, 2.25, 0);
-player.add(orb);
-const orbLight = new THREE.PointLight(0x80ffff, 1.2, 8);
-orbLight.position.copy(orb.position);
-player.add(orbLight);
 
 player.position.set(0, 0, 0);
 
@@ -4237,8 +4219,8 @@ function setViewMode(mode) {
   document.getElementById('viewBtn').classList.toggle('active', viewMode !== 2);
   document.getElementById('mapBtn').classList.toggle('active', viewMode === 2);
   const showBody = (viewMode !== 1); // hide body in first-person
-  body.visible = cape.visible = leftArm.visible = rightArm.visible = staff.visible =
-  head.visible = orb.visible = leftLeg.visible = rightLeg.visible =
+  body.visible = leftArm.visible = rightArm.visible =
+  head.visible = leftLeg.visible = rightLeg.visible =
   leftShoe.visible = rightShoe.visible = showBody;
   // 帽子/髪型は表示状態(showBody)と選択中の性別の両方を満たす時だけ見せる
   hatBrim.visible = hatTop.visible = showBody && charSex !== 'girl';
@@ -4491,23 +4473,39 @@ document.addEventListener('keydown', e => { keys[e.key.toLowerCase()] = true; })
 document.addEventListener('keyup',   e => { keys[e.key.toLowerCase()] = false; });
 
 // ======= JUMP STATE =======
-let velY = 0, airborne = false, hopQueued = false;
+// 押している間は上昇し続け、離すと重力で落下する(以前は押した瞬間だけ働く固定インパルスだった)。
+let velY = 0, airborne = false, hopHeld = false;
 const GRAVITY = -25;
+const RISE_SPEED = 10;   // 押している間の上昇速度(m/s)
+const HOP_MAX_ALT = 25;  // 地面からこの高さで頭打ち(無限に上り続けられないようにする)
 const hopBtn = document.getElementById('hopBtn');
-hopBtn.addEventListener('touchstart', () => { hopQueued = true; }, { passive: true });
-hopBtn.addEventListener('mousedown',  () => { hopQueued = true; });
-// Space: 押すたびに1回分(e.repeat除外で長押しの自動リピートは無効、連打は毎回有効)
-document.addEventListener('keydown', e => { if (e.key === ' ' && !e.repeat) hopQueued = true; });
+hopBtn.addEventListener('touchstart', () => { hopHeld = true; }, { passive: true });
+hopBtn.addEventListener('touchend',   () => { hopHeld = false; }, { passive: true });
+hopBtn.addEventListener('touchcancel',() => { hopHeld = false; }, { passive: true });
+hopBtn.addEventListener('mousedown',  () => { hopHeld = true; });
+hopBtn.addEventListener('mouseup',    () => { hopHeld = false; });
+hopBtn.addEventListener('mouseleave', () => { hopHeld = false; }); // 押したままボタン外へ出た場合も解除
+// Space: 押している間上昇し続け、離すと落下する
+document.addEventListener('keydown', e => { if (e.key === ' ' && !e.repeat) hopHeld = true; });
+document.addEventListener('keyup',   e => { if (e.key === ' ') hopHeld = false; });
 
 // Mouse drag for camera
-let mouseDown = false, lastMouseX = 0, lastMouseY = 0;
-canvas.addEventListener('mousedown', e => { mouseDown = true; lastMouseX = e.clientX; lastMouseY = e.clientY; });
+// 「地面や建物を指(カーソル)でつかんで動かす」感覚にするため、ドラッグを開始した位置が
+// 画面の上半分(空側=キャラより奥)か下半分(地面側=キャラより手前)かで、上下ドラッグに
+// 対する視点の動く向きを反転させる(掴んだ場所がその指の動きに追従するイメージ)。
+// 符号はドラッグ開始時に1回だけ決め、ドラッグ中に指が中心線を跨いでも変えない
+// (掴んだのはその時点の場所、という感覚を保つため)。
+let mouseDown = false, lastMouseX = 0, lastMouseY = 0, mouseDragSign = 1;
+canvas.addEventListener('mousedown', e => {
+  mouseDown = true; lastMouseX = e.clientX; lastMouseY = e.clientY;
+  mouseDragSign = (e.clientY < window.innerHeight / 2) ? -1 : 1;
+});
 canvas.addEventListener('mouseup',   () => { mouseDown = false; });
 canvas.addEventListener('mousemove', e => {
   if (!mouseDown) return;
   // CAM_DIR=+1(新デフォルト)で従来と上下左右が反転した向きになる
   camYaw   += (e.clientX - lastMouseX) * 0.004 * CAM_DIR;
-  camPitch += (e.clientY - lastMouseY) * 0.003 * CAM_DIR;
+  camPitch += (e.clientY - lastMouseY) * 0.003 * CAM_DIR * mouseDragSign;
   camPitch = Math.max(-0.2, Math.min(1.2, camPitch));
   lastMouseX = e.clientX; lastMouseY = e.clientY;
 });
@@ -4516,7 +4514,7 @@ canvas.addEventListener('mousemove', e => {
 const joystickKnob = document.getElementById('joystickKnob');
 let joyActive = false, joyId = null, joyOx = 0, joyOz = 0;
 let joyCenterX = 0, joyCenterY = 0;
-let camTouchId = null, camLastX = 0, camLastY = 0;
+let camTouchId = null, camLastX = 0, camLastY = 0, camTouchSign = 1;
 
 // Joystick zone: bottom-left corner
 function getJoyBounds() {
@@ -4536,6 +4534,9 @@ document.addEventListener('touchstart', e => {
       joyCenterX = joy.cx; joyCenterY = joy.cy;
     } else if (camTouchId === null) {
       camTouchId = t.identifier; camLastX = t.clientX; camLastY = t.clientY;
+      // 「地面や建物を指でつかんで動かす」感覚にするため、つかんだ位置が画面の上半分
+      // (空側)か下半分(地面側)かで上下ドラッグに対する視点の向きを反転させる
+      camTouchSign = (t.clientY < window.innerHeight / 2) ? -1 : 1;
     }
   }
 }, { passive: true });
@@ -4558,7 +4559,7 @@ document.addEventListener('touchmove', e => {
     } else if (t.identifier === camTouchId) {
       // CAM_DIR=+1(新デフォルト)で従来と上下左右が反転した向きになる
       camYaw   += (t.clientX - camLastX) * 0.005 * CAM_DIR;
-      camPitch += (t.clientY - camLastY) * 0.004 * CAM_DIR;
+      camPitch += (t.clientY - camLastY) * 0.004 * CAM_DIR * camTouchSign;
       camPitch = Math.max(-0.3, Math.min(1.4, camPitch));
       camLastX = t.clientX; camLastY = t.clientY;
     }
@@ -5473,9 +5474,13 @@ function animate() {
 
   // ======= ジャンプ・重力・着地(地形と建物屋根の両方に整合) =======
   const floorY = floorHeightAt(player.position.x, player.position.z, player.position.y);
-  // 空中でも再ジャンプ可能(連打で高度を稼げる)。押すたびに上向き速度をリセット
-  if (hopQueued) { velY = 15.6; airborne = true; hopQueued = false; } // 到達高度 ≈ v²/2g ≈ 4.9m
-  if (airborne) {
+  // ボタン/Spaceを押している間は一定速度で上昇し続け(頭打ちHOP_MAX_ALTあり)、
+  // 離すとその場の上向き速度から自然に重力で落下へ移行する。
+  if (hopHeld && (player.position.y - floorY) < HOP_MAX_ALT) {
+    velY = RISE_SPEED;
+    airborne = true;
+    player.position.y += velY * dt;
+  } else if (airborne) {
     velY += GRAVITY * dt;
     player.position.y += velY * dt;
     if (velY <= 0 && player.position.y <= floorY) {
@@ -5527,10 +5532,6 @@ function animate() {
     rightLeg.rotation.x =  0.7 * jumpT;
     player.rotation.x = velY > 0 ? -0.15 * jumpT : 0.1 * jumpT;
   }
-
-  // Orb pulse
-  orbMat.emissiveIntensity = 1.2 + Math.sin(t*3)*0.5;
-  orbLight.intensity = 1.0 + Math.sin(t*3)*0.4;
 
   // Camera
   if (viewMode === 1) {
