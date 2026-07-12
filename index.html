@@ -3522,7 +3522,16 @@ async function loadWideTerrain(centerX = 0, centerZ = 0) {
       pts.push(xzToLatLon(wx, wz));
     }
   const raw = new Array(pts.length).fill(null);
-  try {
+  // 【重要】以前はここだけopentopodata(1req/秒・1日1000コール上限の共有プロキシ)に
+  // 直行しており、loadElevations/loadNearTerrainと違ってGSIタイル(レート制限なし)を
+  // 使っていなかった。上限に達したりプロキシが詰まると遠景(FAR)の実地形が更新されなく
+  // なり、「地形読み込みが止まる」「標高2倍の効果が(遠くの山や海岸で)見えない」の
+  // 原因になっていた。まず国土地理院タイルを試し、国外の点等で使えない時だけ
+  // opentopodataへフォールバックする(loadElevations/loadNearTerrainと同じ方針に統一)。
+  const gsi = await fetchElevationsGSI(pts);
+  if (gsi) {
+    for (let i = 0; i < raw.length; i++) raw[i] = gsi[i];
+  } else try {
     // loadElevations と同じ理由で少数の同時実行数に絞ってバッチ発行する
     // (解像度アップでバッチ数が最大54件まで増えたため、無制限並列だと確実に詰まる)
     const batches = [];
@@ -3533,10 +3542,10 @@ async function loadWideTerrain(centerX = 0, centerZ = 0) {
     });
     for (let bi = 0; bi < results.length; bi++) {
       const j = results[bi];
-      if (!j || !j.results) { wideLoading = false; return; } // 失敗時は現状維持(安全なフォールバック)
+      if (!j || !j.results) { wideLoading = false; onWideTerrainFail(); return; } // 失敗時は現状維持(安全なフォールバック)
       j.results.forEach((r, k) => { raw[bi*100 + k] = r.elevation; });
     }
-  } catch (e) { wideLoading = false; return; }
+  } catch (e) { wideLoading = false; onWideTerrainFail(); return; }
   const arr = new Float32Array(pts.length);
   const oceanFloor = (0 - elevBase) * ELEV_SCALE - 10; // データ無しノードは海底(海面より十分下)扱い
   for (let i = 0; i < raw.length; i++) {
@@ -3545,17 +3554,36 @@ async function loadWideTerrain(centerX = 0, centerZ = 0) {
   }
   wideElev = arr; wideCX = centerX; wideCZ = centerZ; // データと中心を同時に更新
   wideLoading = false;
+  _wideFailCount = 0; // 成功したのでリセット
   updateFarMesh(true); // 遠景メッシュを新しい実地形で再構築
   if (reCenter) showToast('🏔 地形反映完了', { duration: 2500 });
 }
 
+// 遠景(FAR)取得に失敗するたびに呼ぶ。checkNearTerrainのonNearTerrainFailと同じ考え方で、
+// 失敗するたび再試行の間隔を伸ばす(上流を叩き続けない)。5回目以降は10秒間隔で回復を待つ。
+let _wideFailCount = 0;
+function onWideTerrainFail() {
+  _wideFailCount++;
+  if (_wideFailCount === 3) { // 数回続けて失敗した時だけ知らせる(単発の通信エラーではうるさくしない)
+    console.warn('[遠景地形] 取得に失敗しています(' + _wideFailCount + '回目)。取得できるまで自動で再試行します。');
+    showToast('⚠️ 遠景の地形取得に失敗しています(自動で再試行中)', { duration: 3000 });
+  }
+}
+
 // プレイヤーが遠景(FAR)グリッドの中心から離れすぎたら、その場所を中心に取り直す
 // (富士山などへ飛んでも地形が出る)。FARは範囲が広いので頻度は控えめでよい。
+// 【重要】以前は wideElev が未取得(=初回ロードが1度でも失敗した)場合、この関数が
+// 即return するだけで再試行のきっかけが一切無く、そのセッションではFAR(遠景)の
+// 実地形が永久に取得されないまま止まっていた(「地形読み込みが止まる」「標高2倍の
+// 効果が遠景で見えない」の主因と考えられる)。checkNearTerrainと同じく「未取得なら
+// それ自体を取得トリガーにする」形にし、失敗しても一定間隔で自動的に再試行し続ける。
 let _wideCheckFrame = 0;
 function checkWideTerrain() {
-  if (wideLoading || !wideElev) return; // 初回ロード中/未取得は何もしない
-  if ((++_wideCheckFrame) % 120 !== 0) return; // ~2秒ごと
-  if (Math.abs(player.position.x - wideCX) > WIDE_W * 0.32 ||
+  if (wideLoading) return;
+  const interval = 120 * Math.min(5, 1 + _wideFailCount); // 失敗するたび間隔を伸ばす(最大10秒)
+  if ((++_wideCheckFrame) % interval !== 0) return;
+  if (!wideElev ||
+      Math.abs(player.position.x - wideCX) > WIDE_W * 0.32 ||
       Math.abs(player.position.z - wideCZ) > WIDE_D * 0.32) {
     loadWideTerrain(player.position.x, player.position.z);
   }
@@ -4026,8 +4054,9 @@ function jumpToLatLon(toLat, toLon) {
   player.position.set(pos.x, 0, pos.z); // yはanimateの床追従が合わせる
   if (playerMarker) { playerMarker.setLatLng([toLat, toLon]); playerMarker.openPopup(); }
   if (leafletMap) leafletMap.setView([toLat, toLon], leafletMap.getZoom());
-  // 遠景(FAR)グリッドの外へ飛んだら、その場を中心に地形を取り直す(富士山などでも地形・標高が出る)
-  if (wideElev && (Math.abs(pos.x - wideCX) > WIDE_W * 0.32 || Math.abs(pos.z - wideCZ) > WIDE_D * 0.32))
+  // 遠景(FAR)グリッドの外へ飛んだら、その場を中心に地形を取り直す(富士山などでも地形・標高が出る)。
+  // wideElevが未取得(初回ロードが失敗していた等)の場合もここで取得のきっかけになるようにする。
+  if (!wideElev || Math.abs(pos.x - wideCX) > WIDE_W * 0.32 || Math.abs(pos.z - wideCZ) > WIDE_D * 0.32)
     loadWideTerrain(pos.x, pos.z);
   // マップジャンプは高確率でNEARグリッドの範囲外になるので、こちらは毎回無条件で取り直す
   // (範囲が狭く数秒〜十秒程度で終わるため、ジャンプ直後に足元の高解像度地形をすぐ用意できる)
