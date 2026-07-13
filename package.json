@@ -1,8 +1,8 @@
 {
-  "name": "isehara-game",
+  "name": "chronodrift",
   "version": "1.0.0",
   "private": true,
-  "description": "three.js browser game with Node proxy/cache server",
+  "description": "ChronoDrift - three.js browser game with Node proxy/cache server",
   "scripts": {
     "start": "node server/server.js"
   },

@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: isehara-game
+    name: chronodrift
     runtime: node
     plan: free
     buildCommand: "echo no build"

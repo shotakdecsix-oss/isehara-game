@@ -1,4 +1,4 @@
-# isehara-game ローカルサーバ (プロトタイプ)
+# ChronoDrift ローカルサーバ (プロトタイプ)
 
 標高API (opentopodata) と OSM Overpass API をサーバ側でプロキシ+ディスクキャッシュし、
 2回目以降の地形・マップ読み込みを即時にします。**index.html は一切変更していません。**

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * isehara-game ローカルサーバ (プロトタイプ)
+ * ChronoDrift ローカルサーバ (プロトタイプ)
  * - 静的ファイル配信 (ゲーム本体 = 親フォルダの index.html)
  * - /api/elevation/* -> https://api.opentopodata.org/* のプロキシ+ディスクキャッシュ
  * - /api/overpass?*  -> https://overpass-api.de/api/interpreter?* のプロキシ+ディスクキャッシュ
@@ -136,7 +136,7 @@ function scheduleUpstream(host, task) {
 /* ---------- 上流 GET (標準 https、リトライ付き) ---------- */
 function httpsGetOnce(urlStr) {
   return new Promise((resolve, reject) => {
-    const req = https.get(urlStr, { headers: { 'User-Agent': 'isehara-game-proxy/1.0' } }, (res) => {
+    const req = https.get(urlStr, { headers: { 'User-Agent': 'chronodrift-proxy/1.0' } }, (res) => {
       const chunks = [];
       res.on('data', (c) => chunks.push(c));
       res.on('end', () => resolve({
@@ -267,7 +267,7 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(PORT, HOST, () => {
-  console.log('isehara-game server (proxy + cache)');
+  console.log('ChronoDrift server (proxy + cache)');
   console.log(`  game root : ${ROOT}`);
   console.log(`  cache dir : ${CACHE_DIR}`);
   console.log(`  listening : http://localhost:${PORT}/  (LAN: http://<このPCのIP>:${PORT}/)`);
