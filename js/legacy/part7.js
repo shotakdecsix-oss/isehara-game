@@ -18,6 +18,10 @@ function xzToLatLon(x, z) {
 // (「時々ふりかえって現在地を確認する」程度の頻度に抑える)。失敗時は前回の表示を維持する。
 const addressEl = document.getElementById('addressDisplay');
 let addrFetching = false, lastAddrX = null, lastAddrZ = null, _addrCheckFrame = 0;
+// 建物の国別スタイル(getCountryBuildingProfile、part2.js)が参照する現在地の国コード。
+// 住所表示と同じNominatim応答に相乗りするだけなので新規の通信は増やさない。
+// 国境をまたいだ直後は次のcheckAddressDisplay更新(最大約10秒/150m)まで前の国のまま。
+let currentCountryCode = null;
 async function updateAddressDisplay() {
   if (addrFetching) return;
   addrFetching = true;
@@ -33,6 +37,7 @@ async function updateAddressDisplay() {
     const area = a.suburb || a.neighbourhood || a.quarter || a.city_district || '';
     const text = [city, area].filter(Boolean).join('');
     if (addressEl) addressEl.textContent = text ? `📍 ${text}` : '📍 (住所不明)';
+    if (a.country_code) currentCountryCode = a.country_code.toLowerCase();
   } catch (e) { /* 失敗時は前回表示のまま何もしない */ }
   addrFetching = false;
 }

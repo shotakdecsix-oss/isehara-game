@@ -364,6 +364,105 @@ function detailMesh(geo, mat, x, y, z, sx, sy, sz, ry) {
 // 高密度化(現実モード)に合わせて閾値を700→850に微増(プレイヤー近傍の建物が優先的に得る)
 const detailOK = () => minimapBuildings.length < 850;
 const ROOF_COLS = [0x555a66, 0x7a4a3a, 0x4a5a3a, 0x69463c, 0x3f4c59, 0x8a4038]; // 住宅屋根の色バリエーション
+
+// ======= 国別の建物フォールバック・プロファイル(現実モード限定) =======
+// OSMの実測タグ(building:colour/roof:colour/roof:shape/roof:material/building:levels等)は
+// 常に最優先。ここは「タグが無い場所だけ」効く既定値を国/様式ごとに分布(範囲・重み)で
+// 持たせたもので、単一の決め打ち外観にはしない(同じ国の中でも一様にならないように)。
+// 参照される既存ジオメトリ(GABLE_GEO/HIP_GEO/SHED_GEO)はpart3.js側で解決するため、
+// ここでは文字列キー('gable'|'hip'|'flat'|'shed')だけを持つ。
+//
+// 密度・敷地の空き具合は2箇所にだけ効かせる:
+// ①lotPaddingRange = 建物の実フットプリント(位置・サイズ)はそのままに、周囲へ描く
+//   芝生/舗装の縁取りの幅(m)。実測データを書き換えないので「現実の地図と答え合わせ」
+//   という前提を壊さない。
+// ②fallbackGridSpacing/fallbackFillProbability = OSM取得が完全に失敗した時だけの
+//   プレースホルダー生成(buildFallbackMap)用。ここは元々位置が全部架空なので自由に調整できる。
+const REGION_PROFILES = {
+  denseHighRise: { // 香港・シンガポール的な高層密集
+    wallPalette: [0xb8c0c8, 0xc8ccd0, 0xa8b0b8, 0xd0d4d8, 0x98a0a8],
+    roofPalette: [0x707880, 0x606870, 0x585f68],
+    roofShapeWeights: { flat: 0.85, hip: 0.1, gable: 0.05 },
+    roofMaterialBias: null, // コンクリ陸屋根のまま(瓦にしない)
+    levelsRange: [4, 18],
+    flatRoofHeightThreshold: 7,
+    lotPaddingRange: [0, 0.3],
+    lotSurfaceColor: 0x9098a0, // 舗装(余白自体がほぼ無いので目立たない)
+    fallbackGridSpacing: 18, fallbackFillProbability: 0.9,
+  },
+  sprawlingSuburban: { // アメリカ郊外的な広い敷地・低層
+    wallPalette: [0xe8dcc8, 0xd8c8a8, 0xc8d0b8, 0xe0d0d0, 0xd8dce0, 0xe4d8c0],
+    roofPalette: [0x5a4a3a, 0x6a5848, 0x4a4038, 0x3a3430],
+    roofShapeWeights: { hip: 0.5, gable: 0.4, flat: 0.1 },
+    roofMaterialBias: null,
+    levelsRange: [1, 2],
+    flatRoofHeightThreshold: 12,
+    lotPaddingRange: [4, 10],
+    lotSurfaceColor: 0x5a8a3d, // 広い芝生の庭
+    fallbackGridSpacing: 55, fallbackFillProbability: 0.35,
+  },
+  europeanOldTown: { // 急勾配屋根・石壁の旧市街(マンサードは未実装のためgable/hipで代用)
+    wallPalette: [0xd8c8a8, 0xc0b090, 0xe0d0b0, 0xb8a888, 0xccbfa0],
+    roofPalette: [0x2a3038, 0x384048, 0x40342c],
+    roofShapeWeights: { gable: 0.55, hip: 0.35, flat: 0.1 },
+    roofMaterialBias: 'tile',
+    levelsRange: [2, 5],
+    flatRoofHeightThreshold: 14,
+    lotPaddingRange: [0.3, 1],
+    lotSurfaceColor: 0xb0a888, // 石畳
+    fallbackGridSpacing: 22, fallbackFillProbability: 0.75,
+  },
+  aridFlatRoof: { // 乾燥地域の陸屋根・土色壁(気候由来。文化的な決めつけは避け気候基準のみで採用)
+    wallPalette: [0xe0cca0, 0xd8c090, 0xe8d8b0, 0xccb488, 0xe0c8a0],
+    roofPalette: [0xc8b088, 0xd0bc98],
+    roofShapeWeights: { flat: 0.9, hip: 0.1 },
+    roofMaterialBias: null,
+    levelsRange: [1, 4],
+    flatRoofHeightThreshold: 6,
+    lotPaddingRange: [0.5, 2],
+    lotSurfaceColor: 0xd8c090, // 砂地
+    fallbackGridSpacing: 30, fallbackFillProbability: 0.5,
+  },
+};
+// 個別に作り込んだ国(必要になったものから追加)。無ければREGION_FALLBACK_BY_COUNTRYへ、
+// それも無ければnull(=現状通りDEFAULT_WALLS_REAL/ROOF_COLS等の既定値。壊れない)。
+const COUNTRY_BUILDING_PROFILES = {
+  hk: REGION_PROFILES.denseHighRise,
+  us: REGION_PROFILES.sprawlingSuburban,
+};
+// 個別プロファイルが無い国の地域バケツ割り当て。判断根拠が薄い国は入れず未設定のまま
+// (=既定値)にとどめる。「わからない国は現状維持」を明示的なデフォルトにすることで、
+// 憶測でのステレオタイプ化を避ける(§前段の議論どおり)。
+const REGION_FALLBACK_BY_COUNTRY = {
+  sg: 'denseHighRise',
+  ae: 'aridFlatRoof', sa: 'aridFlatRoof', qa: 'aridFlatRoof', kw: 'aridFlatRoof',
+  om: 'aridFlatRoof', bh: 'aridFlatRoof', eg: 'aridFlatRoof', ma: 'aridFlatRoof',
+  dz: 'aridFlatRoof', tn: 'aridFlatRoof', ly: 'aridFlatRoof',
+  gb: 'europeanOldTown', fr: 'europeanOldTown', de: 'europeanOldTown', it: 'europeanOldTown',
+  es: 'europeanOldTown', pt: 'europeanOldTown', nl: 'europeanOldTown', be: 'europeanOldTown',
+  at: 'europeanOldTown', ch: 'europeanOldTown', ie: 'europeanOldTown', dk: 'europeanOldTown',
+  se: 'europeanOldTown', no: 'europeanOldTown', fi: 'europeanOldTown', pl: 'europeanOldTown',
+  cz: 'europeanOldTown',
+  ca: 'sprawlingSuburban', au: 'sprawlingSuburban', nz: 'sprawlingSuburban',
+};
+function getCountryBuildingProfile(cc) {
+  if (!cc) return null;
+  return COUNTRY_BUILDING_PROFILES[cc] || REGION_PROFILES[REGION_FALLBACK_BY_COUNTRY[cc]] || null;
+}
+// roofShapeWeights({flat,gable,hip,shed}の一部だけでも可)から1つ重み付き抽選する。
+// タグ('roof:shape')がある建物には使わない — あくまでタグ欠損時のフォールバック専用。
+function pickWeighted(weights) {
+  const keys = Object.keys(weights);
+  const total = keys.reduce((s, k) => s + (weights[k] || 0), 0);
+  if (total <= 0) return null;
+  let r = Math.random() * total;
+  for (const k of keys) {
+    r -= weights[k] || 0;
+    if (r <= 0) return k;
+  }
+  return keys[keys.length - 1];
+}
+
 const ENTRANCE_MAT = new THREE.MeshBasicMaterial({ color: 0x1a2430 }); // ビル1階の玄関ガラス
 const TANK_MAT = new THREE.MeshLambertMaterial({ color: 0xd8d4c8 });   // 屋上貯水槽
 const AC_MAT = new THREE.MeshLambertMaterial({ color: 0xb8bcc0 });     // 室外機

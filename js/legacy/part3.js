@@ -89,6 +89,9 @@ function addBuilding(x, z, w, d, h, style, isReal) {
   const floors = Math.max(1, Math.round(h / 3)); // building:levels は h に反映済み → 窓の段数に逆算
   const minWD = Math.min(w, d), maxWD = Math.max(w, d);
 
+  // 国別建物プロファイル(現実モード限定。タグ実測値が無い箇所だけのフォールバックに使う)
+  const cprof = MODE === 'real' ? getCountryBuildingProfile(currentCountryCode) : null;
+
   // ---- 壁色(モード別パレット。lambertMat/facadeMat キャッシュを通すので増殖しない) ----
   let isMushroom = false;
   let wallC;
@@ -102,7 +105,8 @@ function addBuilding(x, z, w, d, h, style, isReal) {
   } else if (style && style.color != null) {
     wallC = style.color;
   } else if (MODE === 'real') {
-    wallC = DEFAULT_WALLS_REAL[(Math.random() * DEFAULT_WALLS_REAL.length) | 0];
+    const wp = (cprof && cprof.wallPalette) || DEFAULT_WALLS_REAL;
+    wallC = wp[(Math.random() * wp.length) | 0];
   } else {
     wallC = DEFAULT_WALLS[(Math.random() * DEFAULT_WALLS.length) | 0];
   }
@@ -133,10 +137,29 @@ function addBuilding(x, z, w, d, h, style, isReal) {
   scene.add(mesh);
   parts.push(mesh);
 
+  // ---- 敷地の余白(lotPadding。国プロファイル限定・実測OSM建物のみ) ----
+  // 建物本体のフットプリント・位置には一切触れず、周囲に芝生/舗装の縁取りを追加描画するだけ。
+  // 香港のように余白がほぼ無い国では実質発生せず、アメリカのように広い国だけ効いて見える。
+  // 建物が多いエリアでは描画コストを抑えるため detailOK() でも間引く(既存の庇・屋上設備と同基準)。
+  if (isReal && cprof && cprof.lotPaddingRange && detailOK()) {
+    const [padMin, padMax] = cprof.lotPaddingRange;
+    const pad = padMin + Math.random() * (padMax - padMin);
+    if (pad > 0.05) {
+      const hw = w / 2 + pad, hd = d / 2 + pad;
+      const padPts = [
+        { x: x - hw, z: z - hd }, { x: x + hw, z: z - hd },
+        { x: x + hw, z: z + hd }, { x: x - hw, z: z + hd },
+      ];
+      buildTerrainFollowingAreaPoly(padPts, lambertMat(cprof.lotSurfaceColor || 0x5a8a3d), 0.05, Math.max(hw, hd) * 2, false);
+    }
+  }
+
   // ==== 屋根 — 切妻・寄棟・片流れ・陸屋根+パラペットをモード/種別/高さで出し分け ====
   let roofC = MODE === 'edo' ? 0x3a4450 /* 瓦 */ : (style && style.roofColor) ? style.roofColor : 0x5030a0;
-  if (MODE === 'real' && type === 'house' && Math.random() < 0.6)
-    roofC = ROOF_COLS[(Math.random() * ROOF_COLS.length) | 0]; // 住宅は屋根色もばらす
+  if (MODE === 'real' && type === 'house' && Math.random() < 0.6) {
+    const rp = (cprof && cprof.roofPalette) || ROOF_COLS;
+    roofC = rp[(Math.random() * rp.length) | 0]; // 住宅は屋根色もばらす
+  }
   const rm = roofSurfMat(roofC, null);
   // 屋根材(茅葺き/瓦葺き)は本来「時代」ではなく「農家の集落か、町場の町家か」で決まる
   // (瓦は防火目的で江戸中期以降の都市部では既に一般的。茅葺きは時代を問わず農村の民家)。
@@ -219,10 +242,14 @@ function addBuilding(x, z, w, d, h, style, isReal) {
   } else {
     // 一般建物(現実モード)
     // OSMのroof:shapeタグがあれば形状はそれを優先(flat/gabled/hipped/pyramidal/skillion等)。
-    // タグが無ければ従来通り高さ・種別からの推定/ランダムのまま(挙動・負荷とも変化なし)。
+    // タグが無ければ、国プロファイルのroofShapeWeights(flat/gable/hip/shed)があればそれで
+    // 重み付き抽選し、無ければ従来通り高さ・種別からの推定/ランダムのまま(挙動・負荷とも変化なし)。
     const roofShape = style && style.roofShape;
     const shapeFlat = roofShape === 'flat';
-    const isFlat = shapeFlat || (!roofShape && (h >= 10 || (type === 'apartment' && h >= 7) || (type === 'industrial' && h >= 8)));
+    const countryPick = (!roofShape && cprof && cprof.roofShapeWeights) ? pickWeighted(cprof.roofShapeWeights) : null;
+    const flatThreshold = (cprof && cprof.flatRoofHeightThreshold != null) ? cprof.flatRoofHeightThreshold : 10;
+    const isFlat = shapeFlat || (countryPick ? countryPick === 'flat' :
+      (!roofShape && (h >= flatThreshold || (type === 'apartment' && h >= 7) || (type === 'industrial' && h >= 8))));
     if (isFlat) {
       // 陸屋根+パラペット+屋上設備(貯水槽・室外機・アンテナ)
       dm(PARAPET_GEO, lambertMat(shadeHex(wallC, 0.8)), x, gy + h, z, w + 0.3, 0.9, d + 0.3);
@@ -241,19 +268,24 @@ function addBuilding(x, z, w, d, h, style, isReal) {
         dm(UNIT_CYL, lambertMat(0xcc3322), x - w * 0.32, gy + h + chH - 0.6, z - d * 0.28, 1.34, 1.2, 1.34);
       }
     } else {
-      // 勾配屋根: タグがあれば形状を確定、無ければ従来通り切妻50%/寄棟35%/片流れ15%のランダム
-      // (工場・倉庫は片流れ)。roof:materialが瓦系ならテクスチャも瓦にする。住宅は既定で瓦。
+      // 勾配屋根: タグがあれば形状を確定。無ければ国プロファイルの重み付き抽選結果(countryPick)を
+      // 優先し、それも無ければ従来通り切妻50%/寄棟35%/片流れ15%のランダム(工場・倉庫は片流れ)。
+      // roof:materialが瓦系ならテクスチャも瓦にする。プロファイルが無ければ住宅は既定で瓦。
       let geoR;
       if (roofShape === 'gabled' || roofShape === 'gable') geoR = GABLE_GEO;
       else if (roofShape === 'hipped' || roofShape === 'hip' || roofShape === 'pyramidal') geoR = HIP_GEO;
       else if (roofShape === 'skillion' || roofShape === 'lean_to' || roofShape === 'pitched') geoR = SHED_GEO;
+      else if (countryPick === 'gable') geoR = GABLE_GEO;
+      else if (countryPick === 'hip') geoR = HIP_GEO;
+      else if (countryPick === 'shed') geoR = SHED_GEO;
       else {
         const r = Math.random();
         geoR = type === 'industrial' ? SHED_GEO : r < 0.5 ? GABLE_GEO : r < 0.85 ? HIP_GEO : SHED_GEO;
       }
       const roofMat = style && style.roofMaterial;
       const isTileMat = roofMat === 'roof_tiles' || roofMat === 'tiles' || roofMat === 'tile';
-      const rM = roofSurfMat(roofC, (isTileMat || (MODE === 'real' && type === 'house')) ? 'tile' : null);
+      const defaultTileBias = cprof ? (cprof.roofMaterialBias === 'tile') : (MODE === 'real' && type === 'house');
+      const rM = roofSurfMat(roofC, (isTileMat || defaultTileBias) ? 'tile' : null);
       pitched(geoR, geoR === SHED_GEO ? Math.max(0.8, minWD * 0.18)
                                       : Math.min(4.2, Math.max(1.5, minWD * 0.38)), 1.0, rM);
       // 玄関庇(住宅のみ)

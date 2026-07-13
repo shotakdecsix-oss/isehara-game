@@ -439,7 +439,11 @@ async function loadOSM(preFetchedData) {
       let style = getBuildingStyle(tags);
       if (MODE === 'edo' && shouldSkipEdoBuilding(style)) return; // 江戸: 現代の建物密度をそのまま使わず間引く
       const resolvedH = resolveBuildingHeight(tags);
-      const levels = parseInt(tags['building:levels']) || 1 + Math.floor(Math.random()*3);
+      // building:levelsタグが無い場合の階数フォールバック。国プロファイルのlevelsRangeが
+      // あればそれを使う(香港は塔状に高め、アメリカ郊外は低めに寄る)。無ければ従来通り1〜3階。
+      const cprofH = MODE === 'real' ? getCountryBuildingProfile(currentCountryCode) : null;
+      const [lvMin, lvMax] = (cprofH && cprofH.levelsRange) || [1, 3];
+      const levels = parseInt(tags['building:levels']) || (lvMin + Math.floor(Math.random() * (lvMax - lvMin + 1)));
       let h = resolvedH != null ? resolvedH : Math.max(levels * 3, 3) + Math.random()*2;
       h = applyLandmarkMinHeight(style, h); // 学校・病院・役場・神社仏閣は最低限の高さを確保
       style = classifyResidential(style, w, d, h);
@@ -500,10 +504,15 @@ async function loadOSM(preFetchedData) {
 }
 
 function buildFallbackMap() {
+  // OSM取得が完全に失敗した時だけのプレースホルダー生成。位置は元々全部架空なので、
+  // わかっていれば国プロファイルのグリッド間隔・充填率を使う(わからなければ従来通り40m/0.6)。
+  const cprofFb = getCountryBuildingProfile(currentCountryCode);
+  const gridSpacing = (cprofFb && cprofFb.fallbackGridSpacing) || 40;
+  const fillProb = (cprofFb && cprofFb.fallbackFillProbability != null) ? cprofFb.fallbackFillProbability : 0.6;
   // Grid of buildings (meter scale)
-  for (let x = -1000; x <= 1000; x += 40) {
-    for (let z = -1000; z <= 1000; z += 40) {
-      if (Math.random() < 0.6) {
+  for (let x = -1000; x <= 1000; x += gridSpacing) {
+    for (let z = -1000; z <= 1000; z += gridSpacing) {
+      if (Math.random() < fillProb) {
         const w = 8 + Math.random()*20;
         const d = 8 + Math.random()*20;
         const h = 4 + Math.random()*20;
