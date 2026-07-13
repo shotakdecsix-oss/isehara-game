@@ -72,11 +72,15 @@ function updateForest() {
 const clock = new THREE.Clock();
 let walkCycle = 0;
 
-function animate() {
-  requestAnimationFrame(animate);
-  const dt = Math.min(clock.getDelta(), 0.05);
-  const t  = clock.getElapsedTime();
-
+// ======= EXPLORE MODE: 自由移動・ジャンプ・歩行アニメーション・追従カメラ =======
+// 「3D探索」というゲームプレイそのものに属するロジックをここにまとめ、ModeRegistryの
+// explore モードの onUpdate として登録する(下の registerMode 呼び出し参照)。
+// 挙動・呼び出しタイミングは分割前と完全に同一(animate()の同じ位置から毎フレーム
+// 呼ばれるだけで、処理の中身・順序は一切変えていない)。将来のRPG/アクション等の
+// モードは、この関数を丸ごと差し替えることで全く異なる移動方式・カメラを実装できる。
+// ワールドのストリーミング・描画(チャンク生成・地形・ミニマップ等)はモードに依らない
+// 共通処理として animate() 側に残す。
+function exploreOnUpdate(dt) {
   // 速度: 通常5m/s、最大3倍(15m/s)。スマホ=スティックの倒し量で連続加速、PC=Shiftダッシュ
   // 加速カーブを立たせ(pow0.7×1.15)、6割程度の倒しでも3倍近く出るように
   const joyMag = joyActive ? Math.min(1, Math.sqrt(joyOx*joyOx + joyOz*joyOz)) : 0;
@@ -206,6 +210,18 @@ function animate() {
     camera.position.lerp(safeCam, 0.2);
     camera.lookAt(player.position.x, player.position.y + 1.5, player.position.z);
   }
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = Math.min(clock.getDelta(), 0.05);
+  const t  = clock.getElapsedTime();
+
+  // ゲームプレイモード固有の処理(現状はexplore=3D探索の移動・ジャンプ・カメラ)。
+  // 元は同じ内容がここに直接書かれていたのと完全に同じ順序・タイミングで呼ばれる。
+  // 以降のstation labels・カメラ追従処理はカメラが確定済みであることに依存するため、
+  // この呼び出しは他の処理より先に行う必要がある。
+  if (window.ModeRegistry) ModeRegistry.update(dt);
 
   // Station labels: billboard + ring spin
   for (const sl of stationLabels) {
@@ -286,12 +302,6 @@ function animate() {
   }
   updateFarMesh(); // 200mグリッドをまたいだ時だけ再サンプリング(それ以外は即return)
 
-  // ModeRegistry: 現状は3D探索(explore)の実処理はここより上に直接書かれたまま。
-  // これは将来モード(RPG/アクション等)が割り込むためのフック呼び出しのみで、
-  // 挙動は変えない。実際の探索ロジックをexploreのonUpdateへ移すのは、
-  // 本体スクリプトを物理的にファイル分割するタイミングで行う。
-  if (window.ModeRegistry) ModeRegistry.update(dt);
-
   renderer.render(scene, camera);
   drawMinimap();
   updateGPS(t);
@@ -299,8 +309,9 @@ function animate() {
 
 if (window.ModeRegistry) {
   // 3D探索を最初のゲームプレイモードとして登録する。
-  // 実処理はまだanimate()側に残っているため、onUpdateは現時点ではプレースホルダ。
-  ModeRegistry.registerMode({ id: 'explore', label: '3D探索' });
+  // 移動・ジャンプ・歩行アニメーション・カメラの実処理は exploreOnUpdate(上で定義)に
+  // 分離済み。将来のRPG/アクション等のモードは、同じ枠組みで別のonUpdateを登録すればよい。
+  ModeRegistry.registerMode({ id: 'explore', label: '3D探索', onUpdate: exploreOnUpdate });
   ModeRegistry.switchMode('explore');
 }
 
