@@ -24,6 +24,12 @@ body {
   overflow:hidden; background:#000;
   font-family:"Hiragino Sans","Yu Gothic","Noto Sans JP",sans-serif;
   color:var(--text);
+  /* ジャンプボタン等を長押しした時にテキスト選択やコピー用のカーソル/吹き出しが
+     出てしまう(結果、touchendが早期に発火してジャンプが上昇/下降を繰り返す原因になる)
+     のを防ぐため、ページ全体で選択・コールアウト・タップハイライトを無効化する。 */
+  user-select:none; -webkit-user-select:none;
+  -webkit-touch-callout:none;
+  -webkit-tap-highlight-color:transparent;
 }
 #canvas { display:block; width:100vw; height:100vh; }
 
@@ -157,7 +163,8 @@ body {
   position:fixed; bottom:var(--safe-bottom); right:var(--safe-right);
   width:64px; height:64px; border-radius:50%;
   font-size:26px; color:var(--text); cursor:pointer; pointer-events:all; z-index:30;
-  touch-action:none; user-select:none;
+  touch-action:none; user-select:none; -webkit-user-select:none;
+  -webkit-touch-callout:none; -webkit-tap-highlight-color:transparent;
 }
 #hopBtn:active { background:rgba(139,123,255,0.35); }
 /* Map overlay */
@@ -1707,6 +1714,23 @@ function applyLandmarkMinHeight(style, h) {
   if (!style) return h;
   const min = LANDMARK_MIN_H[style.type];
   return min ? Math.max(h, min) : h;
+}
+
+// 江戸: OSM建物の実測高さ(現代の高層マンション・オフィスビル等)をそのまま使うと、
+// 明治(実測データに基づき低層の集落家屋へ全面差し替え済み)より江戸の方が高層建築だらけに
+// 見えてしまう(本来は逆で、江戸期の方が古く木造2階建て程度が大半のはず)。
+// 神社仏閣・城郭など一部の例外を除き、天井高さを木造家屋相当に抑える。
+const EDO_MAX_H = { shrine: 16, temple: 16, church: 16, school: 8, hospital: 8, government: 9, apartment: 8, industrial: 8, shop: 8, house: 8, default: 8 };
+function applyEdoHeightCap(style, h) {
+  const cap = EDO_MAX_H[(style && style.type) || 'default'];
+  return Math.min(h, cap != null ? cap : EDO_MAX_H.default);
+}
+// 同じ理由で建物の「数」も現代の密集度をそのまま使うと多すぎる。
+// ランドマーク(神社仏閣)以外は一定確率で間引き、当時の低密度な町並みに近づける。
+function shouldSkipEdoBuilding(style) {
+  const t = style && style.type;
+  if (t === 'shrine' || t === 'temple' || t === 'church') return false;
+  return Math.random() < 0.4;
 }
 
 // マンション・工場は一戸建てよりはっきり大きく見えるべき。タグ欠落時のランダム
@@ -3871,6 +3895,7 @@ async function loadOSM(preFetchedData) {
       if (isCampusOnly) { w = Math.min(w, 34); d = Math.min(d, 22); } // 敷地全体でなく校舎サイズに収める
 
       let style = getBuildingStyle(tags);
+      if (MODE === 'edo' && shouldSkipEdoBuilding(style)) return; // 江戸: 現代の建物密度をそのまま使わず間引く
       const resolvedH = resolveBuildingHeight(tags);
       const levels = parseInt(tags['building:levels']) || 1 + Math.floor(Math.random()*3);
       let h = resolvedH != null ? resolvedH : Math.max(levels * 3, 3) + Math.random()*2;
@@ -3878,6 +3903,7 @@ async function loadOSM(preFetchedData) {
       style = classifyResidential(style, w, d, h);
       let fw = w, fd = d, fh = h;
       ({ w: fw, d: fd, h: fh } = applySizeFloor(style, w, d, h)); // マンション・工場は最低サイズを底上げ
+      if (MODE === 'edo') fh = applyEdoHeightCap(style, fh); // 江戸: 現代建物の実測高さそのままだと高層ビルになるため木造家屋相当に抑える
       // 直接生成せず、タイル取得分と同じキューに積んでフレーム分割で生成する。
       // 【重要】以前はここで直接addBuildingしており、NEAR高解像度地形がまだ届く前に
       // 高さが焼き込まれてしまい、初期スポーン周辺の建物が浮く/埋まる主な原因になっていた。
@@ -4013,7 +4039,7 @@ function xzToLatLon(x, z) {
 // Nominatim(OSMの逆ジオコーディング)を server/server.js 経由(/api/nominatim)で叩く。
 // 公式ポリシー上、移動のたびに逐次リバースジオコーディングする使い方は
 // 「reverse queries in a grid」に近く、頻度が高すぎると禁止行為(BAN対象)とみなされ得る。
-// そのため、時間(約45秒)と移動距離(400m)の両方が閾値を超えたときだけ再取得する
+// そのため、時間(約10秒)と移動距離(150m)の両方が閾値を超えたときだけ再取得する
 // (「時々ふりかえって現在地を確認する」程度の頻度に抑える)。失敗時は前回の表示を維持する。
 const addressEl = document.getElementById('addressDisplay');
 let addrFetching = false, lastAddrX = null, lastAddrZ = null, _addrCheckFrame = 0;
@@ -4038,8 +4064,8 @@ async function updateAddressDisplay() {
 function checkAddressDisplay() {
   if (!initialWorldLoaded) return;
   _addrCheckFrame++;
-  if (_addrCheckFrame % 2700 !== 0) return; // ~45秒ごと
-  if (lastAddrX !== null && Math.hypot(player.position.x - lastAddrX, player.position.z - lastAddrZ) < 400) return;
+  if (_addrCheckFrame % 600 !== 0) return; // ~10秒ごと(以前は45秒ごとで反映が遅く感じられたため短縮)
+  if (lastAddrX !== null && Math.hypot(player.position.x - lastAddrX, player.position.z - lastAddrZ) < 150) return;
   lastAddrX = player.position.x; lastAddrZ = player.position.z;
   updateAddressDisplay();
 }
@@ -4479,12 +4505,17 @@ const GRAVITY = -25;
 const RISE_SPEED = 10;   // 押している間の上昇速度(m/s)
 const HOP_MAX_ALT = 25;  // 地面からこの高さで頭打ち(無限に上り続けられないようにする)
 const hopBtn = document.getElementById('hopBtn');
-hopBtn.addEventListener('touchstart', () => { hopHeld = true; }, { passive: true });
-hopBtn.addEventListener('touchend',   () => { hopHeld = false; }, { passive: true });
-hopBtn.addEventListener('touchcancel',() => { hopHeld = false; }, { passive: true });
-hopBtn.addEventListener('mousedown',  () => { hopHeld = true; });
+// passive:false + preventDefault() で、長押し時にiOS/Androidのテキスト選択・コピー用
+// 吹き出し(callout)やマウス選択カーソルが出るのを止める。これが出るとtouchend/mouseupが
+// 途中で発火してhopHeldが意図せずfalseに戻り、上昇し続けられず上下動を繰り返していた。
+hopBtn.addEventListener('touchstart', e => { e.preventDefault(); hopHeld = true; }, { passive: false });
+hopBtn.addEventListener('touchend',   e => { e.preventDefault(); hopHeld = false; }, { passive: false });
+hopBtn.addEventListener('touchcancel',e => { e.preventDefault(); hopHeld = false; }, { passive: false });
+hopBtn.addEventListener('mousedown',  e => { e.preventDefault(); hopHeld = true; });
 hopBtn.addEventListener('mouseup',    () => { hopHeld = false; });
 hopBtn.addEventListener('mouseleave', () => { hopHeld = false; }); // 押したままボタン外へ出た場合も解除
+hopBtn.addEventListener('contextmenu', e => e.preventDefault()); // 長押しでの右クリックメニュー/コールアウトも抑止
+hopBtn.addEventListener('selectstart', e => e.preventDefault()); // 万一のテキスト選択開始も抑止
 // Space: 押している間上昇し続け、離すと落下する
 document.addEventListener('keydown', e => { if (e.key === ' ' && !e.repeat) hopHeld = true; });
 document.addEventListener('keyup',   e => { if (e.key === ' ') hopHeld = false; });
@@ -4779,6 +4810,7 @@ function processTileData(data) {
     let w=Math.max(maxDx*2,2), d=Math.max(maxDz*2,2);
     if (isCampusOnly) { w = Math.min(w, 34); d = Math.min(d, 22); } // 敷地全体でなく校舎サイズに収める
     let style = getBuildingStyle(tags);
+    if (MODE === 'edo' && shouldSkipEdoBuilding(style)) return; // 江戸: 現代の建物密度をそのまま使わず間引く
     const resolvedH = resolveBuildingHeight(tags);
     const levels = parseInt(tags['building:levels']) || 1+Math.floor(Math.random()*3);
     let h = resolvedH != null ? resolvedH : Math.max(levels*3,3)+Math.random()*2;
@@ -4786,6 +4818,7 @@ function processTileData(data) {
     style = classifyResidential(style, w, d, h);
     let fw = w, fd = d, fh = h;
     ({ w: fw, d: fd, h: fh } = applySizeFloor(style, w, d, h)); // マンション・工場は最低サイズを底上げ
+    if (MODE === 'edo') fh = applyEdoHeightCap(style, fh); // 江戸: 現代建物の実測高さそのままだと高層ビルになるため木造家屋相当に抑える
     pendingBuildings.push({ x: cx, z: cz, w: fw, d: fd, h: fh, style, real: true });
   });
   // Landuse polygons for chunk system
