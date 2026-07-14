@@ -366,16 +366,36 @@ function recenterForResumeIfFar(lat, lon) {
     recenterOrigin(lat, lon);
     fetchedOSMTiles.clear();
     loadedOSMTiles.clear();
+    return true;
   }
+  return false;
 }
 
 // data を省略した場合は自分で fetchOSMData() する(従来どおりの単体呼び出しにも対応)
 async function loadOSM(preFetchedData) {
+  // 【重要】resumeを先に読んでおき、原点を付け替えるほど遠い再開先なら、伊勢原の同梱データ/
+  // Overpassクエリによる初期ワールド構築(道路・水域等は同期でscene追加、建物はキュー投入)を
+  // 丸ごとスキップする。以前はここを必ず一度フルに実行してから原点を付け替えていたため、
+  // 伊勢原の道路・建物が新しい原点(0,0=ジャンプ先)にそのまま重なって表示され続ける不具合が
+  // 実機で確認された(道路は同期追加なので、後から取り除くよりここで作らない方が確実)。
+  // 新しい地域のOSMデータは、この後part8.jsのタイル取得システムが実際の周辺タイルとして
+  // 取得する(伊勢原以外の場所はもともとそちらが担当している)。
+  const resume = consumeResumePos();
+  if (resume && recenterForResumeIfFar(resume.lat, resume.lon)) {
+    const rp = latLonToXZ(resume.lat, resume.lon);
+    player.position.set(rp.x, 0, rp.z);
+    if (typeof resume.yaw === 'number') camYaw = resume.yaw;
+    if (typeof resume.rot === 'number') player.rotation.y = resume.rot;
+    initialWorldLoaded = true;
+    return;
+  }
   const data = preFetchedData !== undefined ? preFetchedData : await fetchOSMData();
 
   if (!data || !data.elements) {
     showToast('⚠️ OSM取得失敗 - フォールバックマップ使用');
-    buildFallbackMap();
+    // 【重要】resumeは関数冒頭で既にconsumeResumePos()済み(1回しか読めない)なので、
+    // buildFallbackMap内で再度読もうとしてもnullになってしまう。ここで渡す。
+    buildFallbackMap(resume);
     return;
   }
   showToast(`✅ OSMデータ取得完了 (${data.elements.length} 要素)`);
@@ -527,9 +547,9 @@ async function loadOSM(preFetchedData) {
   showToast(`✨ ChronoDriftの世界へようこそ！ (建物:${buildingCount} 道路:${roadCount})`, { duration: 4000 });
 
   // モード切替リロードなら切替前の位置・向きから再開、通常起動は東成瀬2-2-11にスポーン
-  const resume = consumeResumePos();
+  // 【重要】resumeは関数冒頭で既に読み込み・consume済み(上の早期returnの判定に使った)なので、
+  // ここで再度 consumeResumePos() は呼ばない(2回目は必ずnullを返し、消費済みのデータが失われる)。
   if (resume) {
-    recenterForResumeIfFar(resume.lat, resume.lon);
     const rp = latLonToXZ(resume.lat, resume.lon);
     player.position.set(rp.x, 0, rp.z); // yはanimateの床追従が地形/屋根に合わせる
     if (typeof resume.yaw === 'number') camYaw = resume.yaw;
@@ -542,7 +562,7 @@ async function loadOSM(preFetchedData) {
   initialWorldLoaded = true; // ここからタイル取得を許可(標高は既に反映済み)。森は updateForest が周囲に描く
 }
 
-function buildFallbackMap() {
+function buildFallbackMap(preConsumedResume) {
   // OSM取得が完全に失敗した時だけのプレースホルダー生成。位置は元々全部架空なので、
   // わかっていれば国プロファイルのグリッド間隔・充填率を使う(わからなければ従来通り40m/0.6)。
   const cprofFb = getCountryBuildingProfile(currentCountryCode);
@@ -565,7 +585,9 @@ function buildFallbackMap() {
     addRoad(i, -1200, i, 1200, 6);
   }
   showToast('✨ ChronoDriftの世界（フォールバック）へようこそ！', { duration: 3000 });
-  const resume2 = consumeResumePos();
+  // 【重要】loadOSM側で既にconsumeResumePos()済みの値を引数で受け取る(呼び出し元経由でない
+  // 単体呼び出し向けに、渡されなかった場合だけ自前で読む=従来の挙動を維持)。
+  const resume2 = preConsumedResume !== undefined ? preConsumedResume : consumeResumePos();
   if (resume2) {
     recenterForResumeIfFar(resume2.lat, resume2.lon);
     const rp2 = latLonToXZ(resume2.lat, resume2.lon);
