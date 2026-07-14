@@ -495,13 +495,12 @@ async function loadOSM(preFetchedData) {
   });
 
   // === PASS 2: Buildings — skip any that overlap a road ===
-  // このバッチ(=OSM_BOUNDS全体、初期ロードは常に伊勢原)の実測建物密度を先に見て、
-  // 国プロファイルより高層寄りに上書きするか一度だけ決める(1棟ごとに判定すると
-  // 同じエリア内で階数がバラバラになってしまうため)。
+  // このバッチ(=OSM_BOUNDS全体、初期ロードは常に伊勢原)は約12km²ある。以前はこの全体で
+  // 1つの被覆率しか見ておらず、駅前の密集地が平均を押し上げて田畑の建物まで高層化される
+  // 不具合があった(DENSITY_CELL_M格子化の経緯はpart2.js computeLocalDensityGrid参照)。
+  // セルごとの被覆率グリッドを1度だけ作り、建物1棟ごとにその重心が属するセルで判定する。
   const cprofHBase = MODE === 'real' ? getCountryBuildingProfile(currentCountryCode) : null;
-  const cprofHBatch = MODE === 'real'
-    ? applyLocalDensityOverride(cprofHBase, estimateFootprintAreaM2(data.elements), WORLD_W * WORLD_D)
-    : null;
+  const densityGrid = MODE === 'real' ? computeLocalDensityGrid(data.elements) : null;
   data.elements.forEach(el => {
     if (el.type !== 'way') return;
     const tags = el.tags || {};
@@ -540,8 +539,8 @@ async function loadOSM(preFetchedData) {
       const resolvedH = resolveBuildingHeight(tags);
       // building:levelsタグが無い場合の階数フォールバック。国プロファイルのlevelsRangeが
       // あればそれを使う(香港は塔状に高め、アメリカ郊外は低めに寄る)。無ければ従来通り1〜3階。
-      // cprofHBatch はこのバッチ全体で1度だけ決めた値(国プロファイル or 実測密度による上書き)。
-      const cprofH = cprofHBatch;
+      // cprofH はこの建物の重心が属するセルの被覆率で1棟ごとに決める(バッチ全体の平均ではない)。
+      const cprofH = localDensityProfileAt(cprofHBase, densityGrid, cx, cz);
       const [lvMin, lvMax] = (cprofH && cprofH.levelsRange) || [1, 3];
       const levels = parseInt(tags['building:levels']) || (lvMin + Math.floor(Math.random() * (lvMax - lvMin + 1)));
       let h = resolvedH != null ? resolvedH : Math.max(levels * 3, 3) + Math.random()*2;

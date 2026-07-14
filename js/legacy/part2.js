@@ -470,11 +470,25 @@ function applyLocalDensityOverride(baseProfile, footprintAreaM2, areaM2) {
   }
   return baseProfile;
 }
-// data.elements内のbuilding要素について、各棟のバウンディングボックス面積(w×d近似、
-// PASS-2/part8.js本体の建物サイズ計算と同じ近似)を合計する。applyLocalDensityOverride
-// の被覆率計算用の軽量フットプリント推定(実際の生成より前に、密度判定のためだけに使う)。
-function estimateFootprintAreaM2(elements) {
-  let total = 0;
+// ======= 局所密度判定のグリッド化(2026-07-14) =======
+// 【経緯】当初のapplyLocalDensityOverrideは「1バッチ全体で1つの被覆率」しか見ておらず、
+// (旧estimateFootprintAreaM2で建物フットプリント合計を求め、バッチの地理的な広さで割るだけの
+// 単純な比較だった)。バッチ=part6.jsの初期ロードなら伊勢原OSM_BOUNDS全体(約12km²)、
+// part8.jsの歩行時取得なら最大6タイル分(約15km²)と、どちらも「駅前の密集地〜田畑」が
+// 同時に混ざりうる広さがある。その結果、実機検証で以下の二重の誤判定が発生した:
+//   (a) 伊勢原: 駅前が押し上げた平均被覆率が閾値を超え、同じバッチ内の田畑の建物までまとめて
+//       高層(denseHighRise)化されてしまい、田園地帯にペンシルビルが林立する不具合。
+//   (b) ニューヨーク等: 逆に、広い道路・公園・河川を含む同バッチの平均で薄まり、実際は
+//       密集した街区(マンハッタンの一角等)でも閾値を割ってしまい、高層化が発動しない不具合。
+// どちらも「バッチという単位が地理的に広すぎる」ことが原因なので、バッチをDENSITY_CELL_M四方の
+// 格子に分割し、セルごとに被覆率を集計→判定する。セルは「概ね1〜数区画」程度の大きさを狙い、
+// 細かすぎて同じ通り沿いで階数がバラバラになる(既存のバッチ単位設計が避けたかった見た目のブレ)
+// ことも、粗すぎて密集地と農地を混同することも避ける。
+const DENSITY_CELL_M = 250;
+// elements内の建物フットプリントを、ワールド座標のDENSITY_CELL_M格子セルごとに集計する。
+// 戻り値はセルキー("cx,cz")→合計フットプリント面積(m2)のMap。
+function computeLocalDensityGrid(elements) {
+  const cellFootprint = new Map();
   for (const el of elements) {
     if (el.type !== 'way' || !el.tags || !el.tags.building || !el.geometry || el.geometry.length < 4) continue;
     const pts = el.geometry.map(g => latLonToXZ(g.lat, g.lon));
@@ -483,9 +497,20 @@ function estimateFootprintAreaM2(elements) {
     cx /= pts.length; cz /= pts.length;
     let maxDx = 0, maxDz = 0;
     pts.forEach(p => { maxDx = Math.max(maxDx, Math.abs(p.x - cx)); maxDz = Math.max(maxDz, Math.abs(p.z - cz)); });
-    total += Math.max(maxDx * 2, 2) * Math.max(maxDz * 2, 2);
+    const area = Math.max(maxDx * 2, 2) * Math.max(maxDz * 2, 2);
+    const key = Math.floor(cx / DENSITY_CELL_M) + ',' + Math.floor(cz / DENSITY_CELL_M);
+    cellFootprint.set(key, (cellFootprint.get(key) || 0) + area);
   }
-  return total;
+  return cellFootprint;
+}
+// 指定座標(建物の重心x,z)が属するセルの被覆率で、その建物1棟分のプロファイルを決める。
+// gridがnull(現実モード以外、またはOSM要素が無いバッチ)ならbaseProfileをそのまま返す。
+// セル面積は常にDENSITY_CELL_M四方の固定値(セル自体の大きさは地理的に変わらないため)。
+function localDensityProfileAt(baseProfile, grid, x, z) {
+  if (!grid) return baseProfile;
+  const key = Math.floor(x / DENSITY_CELL_M) + ',' + Math.floor(z / DENSITY_CELL_M);
+  const footprint = grid.get(key) || 0;
+  return applyLocalDensityOverride(baseProfile, footprint, DENSITY_CELL_M * DENSITY_CELL_M);
 }
 // roofShapeWeights({flat,gable,hip,shed}の一部だけでも可)から1つ重み付き抽選する。
 // タグ('roof:shape')がある建物には使わない — あくまでタグ欠損時のフォールバック専用。

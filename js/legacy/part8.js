@@ -83,14 +83,16 @@ function processStationNodes(elements) {
 
 function processTileData(data, tileCount) {
   if (!data || !data.elements) return;
-  // このバッチ(tileCount枚のタイル分、1枚=OSM_TILE_M四方)の実測建物密度を先に見て、
-  // 国プロファイルより高層寄りに上書きするか一度だけ決める(part6.js PASS-2と同じ考え方。
+  // このバッチ(tileCount枚のタイル分、1枚=OSM_TILE_M四方=最大6枚で約15km²)の実測建物密度を
+  // 先に見て、国プロファイルより高層寄りに上書きするか決める(part6.js PASS-2と同じ考え方。
   // 「USも高密度地帯は高層ビルにして」への対応 — 国単位の固定ルールだけでは同じ国の中の
   // 都心部と郊外の違いを表現できないため、実測の建物密度で判定する)。
+  // 【重要】以前はバッチ全体で1つの被覆率しか見ていなかったため、広い道路・公園・河川を
+  // 含む6タイル分の平均で薄まり、実際は密集した街区(マンハッタンの一角等)でも高層化が
+  // 発動しない不具合があった。DENSITY_CELL_M格子で建物1棟ごとに判定する
+  // (経緯・格子サイズの選定理由はpart2.js computeLocalDensityGrid参照)。
   const cprofH8Base = MODE === 'real' ? getCountryBuildingProfile(currentCountryCode) : null;
-  const cprofH8Batch = MODE === 'real'
-    ? applyLocalDensityOverride(cprofH8Base, estimateFootprintAreaM2(data.elements), (tileCount || 1) * OSM_TILE_M * OSM_TILE_M)
-    : null;
+  const densityGrid8 = MODE === 'real' ? computeLocalDensityGrid(data.elements) : null;
   // 駅ランドマーク(初期範囲の外にある駅も、タイルが届いた時点でここで拾う)
   processStationNodes(data.elements);
   // Roads
@@ -169,7 +171,7 @@ function processTileData(data, tileCount) {
     // 呼ばれる経路で、part6.js側だけに国プロファイルを配線していたため、ジャンプ直後の
     // 初期範囲を過ぎて歩き回った先の建物には反映されていなかった(香港で歩き続けると
     // 低層タグの建物がまた出る不具合の原因)。
-    const cprofH8 = cprofH8Batch;
+    const cprofH8 = localDensityProfileAt(cprofH8Base, densityGrid8, cx, cz);
     const [lvMin8, lvMax8] = (cprofH8 && cprofH8.levelsRange) || [1, 3];
     const levels = parseInt(tags['building:levels']) || (lvMin8 + Math.floor(Math.random() * (lvMax8 - lvMin8 + 1)));
     let h = resolvedH != null ? resolvedH : Math.max(levels*3,3)+Math.random()*2;
