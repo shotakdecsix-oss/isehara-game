@@ -321,30 +321,15 @@ let MID_LAT = (OSM_BOUNDS.minLat + OSM_BOUNDS.maxLat) / 2;
 let MID_LON = (OSM_BOUNDS.minLon + OSM_BOUNDS.maxLon) / 2;
 let COS_LAT = Math.cos(OSM_BOUNDS.minLat * Math.PI / 180);
 
-// 今いる場所が伊勢原本体(SPAWN_LAT/SPAWN_LON、詳細地形データがカバーする範囲)に
-// 近いかどうか。recenterOrigin が呼ばれるたび、この判定で AT_HOME_REGION を更新する。
-function isNearIsehara(lat, lon) {
-  const dLat = (lat - SPAWN_LAT) * SCALE;
-  const dLon = (lon - SPAWN_LON) * SCALE * COS_LAT;
-  return Math.hypot(dLat, dLon) < 50000; // 50km以内なら「伊勢原本体」とみなす
-}
-
-// 遠方ジャンプで原点を伊勢原以外へ付け替えた状態かどうか。
-// 【重要】伊勢原専用の詳細地形メッシュ(terrainMesh, part5.js)や farNodeY の
-// 「詳細エリア内ブレンド」は元々ローカル原点付近=伊勢原の実データという前提で
-// 作られている。浮動原点によりジャンプ後は原点(=ローカル座標の中心)がジャンプ先に
-// 移るため、この前提が崩れて「伊勢原の地形形状が海外の地形/海面に重なって表示される」
-// 不具合(ちらつき/重なり)が起きる。AT_HOME_REGION=false のときは伊勢原の詳細地形を
-// 一切使わない(terrainMesh非表示・getGroundY/farNodeYはwideElev/getWideTerrainYのみ参照)。
-let AT_HOME_REGION = true;
-
 // 原点をlat,lonへ付け替える(浮動原点の再設定)。COS_LATも現在地の緯度に合わせて更新するため、
 // 経度→メートル換算の精度も(伊勢原基準の固定値だった頃に比べ)副次的に改善する。
+// 【2026-07-14】地形描写を伊勢原専用メッシュ廃止・全地域共通(part5/part6.js)に統一したのに
+// 合わせ、ここでは regionBaseReady(part6.js)を false に戻すだけでよい。次の loadNearTerrain
+// 成功時に、新しい地域の実データから elevBase/ROCK_Y/SNOW_Y/TREELINE/海面高さが確定し直される。
 function recenterOrigin(lat, lon) {
   MID_LAT = lat; MID_LON = lon;
   COS_LAT = Math.cos(lat * Math.PI / 180);
-  AT_HOME_REGION = isNearIsehara(lat, lon);
-  if (terrainMesh) terrainMesh.visible = AT_HOME_REGION;
+  regionBaseReady = false;
 }
 
 function latLonToXZ(lat, lon) {

@@ -33,7 +33,7 @@ function boxNear(x, z, r) {
 
 // プレイヤー周囲 FOREST_R 内の山(FOREST_MIN_H〜TREELINE)へ木を敷き直す(近傍判定はO(1)相当で軽量)
 function rebuildForest() {
-  if (!elevData) return;
+  if (!regionBaseReady) return; // このリージョンの高度基準(TREELINE等)がまだ確定していない
   resetPool(forestTrunkP);
   forestLeafPools.forEach(resetPool);
   const px = player.position.x, pz = player.position.z;
@@ -332,27 +332,37 @@ window.addEventListener('resize', () => {
 });
 
 // ======= 起動ブートストラップ(元 part6.js 末尾から移動) =======
-// 【重要】このIIFEはloadElevations()経由でxzToLatLon(part7.js定義)などを同期的に呼ぶため、
+// 【重要】このIIFEはxzToLatLon(part7.js定義)などを同期的に呼ぶため、
 // 9ファイルすべての読み込みが終わった後(=このpart9.jsの実行時点)で初めて安全に実行できる。
 // part6.jsに置いたままだと、part7.js〜part9.jsがまだ読み込まれる前にReferenceErrorで停止していた。
 // Load terrain first, then place OSM world on top
 // 明治モードは迅速測図の土地利用データを先に読む(チャンク生成が依存)
 (async () => {
   const startLocP = getStartLocation(); // 位置情報の取得を本編ロードと並行で開始
-  // モード切替リロード(江戸↔現実など)では切替前の位置に戻す。その時は現在地ジャンプしない。
+  // モード切替リロード(江戸↔現実など)や遠方ジャンプ後の再開では切替/ジャンプ前の位置に戻す。
+  // その時は現在地ジャンプしないし、これから行う伊勢原の初期地形取得も無駄になる(後述)。
   let isModeSwitch = false;
   try { isModeSwitch = !!localStorage.getItem('iseharaResumePos'); } catch (e) {}
   // OSM取得は地形データにもmeiji土地利用データにも依存しないので、それらの取得と
   // 並行して先に投げておく(以前は地形→OSMの完全直列で、両方の待ち時間がそのまま合算されていた)
   const osmDataP = fetchOSMData();
-  await loadElevations();
+  // 伊勢原本体(原点)のNEAR地形を先に取得しておく。loadOSM()が組み立てる伊勢原の初期
+  // ワールド(道路・建物)はgetGroundYで接地するため、その前に地形データ(とそれが確定する
+  // elevBase等)が必要。【重要】isModeSwitchがtrueでも省略できない —
+  // 「モード切替(江戸↔現実など)による再開」と「遠方ジャンプによる再開」はどちらも同じ
+  // iseharaResumePosを使うため、この時点(loadOSM呼び出し前)ではまだ区別できない。
+  // 前者は伊勢原本体をこの後も通常どおり構築するので地形データが必要、後者は
+  // loadOSM内部で伊勢原の構築ごとスキップする(その場合ここは無駄なfetchになるが、
+  // 実害はない小さな待ち時間で済む)。
+  await loadNearTerrain(0, 0);
   if (USES_MEIJI_LANDUSE) await loadMeijiLanduse();
-  await loadOSM(await osmDataP); // モード切替時はここで切替前の位置に復帰する
-  // 通常起動のみ初期位置へ移動(現在地、取れなければ東京駅)。伊勢原の詳細地形は座標基準として残し、
-  // 現在地の地形は遠景グリッド(約1km間隔)+ OSMタイルで表示する。
+  // モード切替/遠方ジャンプの再開時は、loadOSM()内部で再開先へ原点を付け替え(recenterOrigin)、
+  // regionBaseReadyがfalseに戻るため、下のloadNearTerrainで新しい地域の高度基準が確定し直される。
+  await loadOSM(await osmDataP);
+  // 通常起動のみ初期位置へ移動(現在地、取れなければ東京駅)。
   const loc = await startLocP;
   if (!isModeSwitch) jumpToLatLon(loc.lat, loc.lon);
-  // 最終的なプレイヤー位置を中心に、FAR(広域・低解像度)とNEAR(周辺・高解像度)を両方取得
-  loadWideTerrain(player.position.x, player.position.z);
+  // 最終的なプレイヤー位置を中心に、NEAR(周辺・高解像度)とFAR(広域・低解像度)を両方取得
   loadNearTerrain(player.position.x, player.position.z);
+  loadWideTerrain(player.position.x, player.position.z);
 })();

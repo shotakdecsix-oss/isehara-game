@@ -204,7 +204,7 @@ moonLight.shadow.camera.left = moonLight.shadow.camera.bottom = -1500;
 moonLight.shadow.camera.right = moonLight.shadow.camera.top = 1500;
 scene.add(moonLight);
 
-// Warm torch point lights — 地形読み込み後に地表高さへ再配置する(下の loadElevations 参照)
+// Warm torch point lights — 地形読み込み後に地表高さへ再配置する(part6.js establishRegionBase 参照)
 const torchColors = [0xff6a00, 0xff8c40, 0xffaa60];
 const torchLights = [];
 for (let i = 0; i < 6; i++) {
@@ -264,10 +264,6 @@ function applyTimeOfDay() {
 }
 applyTimeOfDay();
 setInterval(applyTimeOfDay, 60000); // 1分ごとに時間帯を更新
-
-// ======= GROUND / TERRAIN =======
-// Placeholder — actual terrain mesh is built after OSM_BOUNDS constants are defined
-let terrainMesh = null; // set up after OSM constants
 
 // ======= COLLISION BOXES =======
 let collisionBoxes = [];

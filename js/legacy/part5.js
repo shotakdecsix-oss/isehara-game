@@ -3,34 +3,28 @@
  * ファイル(5/9)。part4.js の続き。詳細は part1.js 冒頭のコメント参照。
  */
 // ======= TERRAIN SYSTEM =======
-const TERRAIN_SEGS = 24; // 25x25 = 625 vertices, ~170m grid
+// 【重要・2026-07-14 大改修】以前は「伊勢原専用の詳細地形メッシュ(terrainMesh、常にローカル
+// 原点に固定)」と「プレイヤー追従の遠景メッシュ(farMesh、wideElev/nearElevを参照)」の2枚構成
+// だった。浮動原点(recenterOrigin)導入後、遠方ジャンプ後はローカル原点付近=常に現在地になる
+// ため、詳細メッシュ(伊勢原の地形形状)が現在地の地形・海面に重なって表示される不具合が
+// 繰り返し起きた。地域ごとの特別扱いを増やして塞ぐより、そもそも地形描写を1系統に統一する
+// 方が保守性が高いため、詳細メッシュを廃止し、farMesh(+wideElev/nearElev)だけを唯一の地形
+// メッシュとして伊勢原本体も含め全地域で使う。伊勢原本体の高解像度データは失われない
+// (loadNearTerrain/loadWideTerrainは元々、国内なら国土地理院タイル=詳細メッシュと同じ品質の
+// データを使っている。part6.js冒頭のコメント参照)。
 const WORLD_W = (OSM_BOUNDS.maxLon - OSM_BOUNDS.minLon) * SCALE * COS_LAT;
 const WORLD_D = (OSM_BOUNDS.maxLat - OSM_BOUNDS.minLat) * SCALE;
-const SEGS1 = TERRAIN_SEGS + 1;
 
-// Build terrain mesh (detailed, covers OSM area)
-// 高さ別の頂点カラーで起伏を視覚化するマテリアル(遠景地形と共用)
-const terrainGeo = new THREE.PlaneGeometry(WORLD_W, WORLD_D, TERRAIN_SEGS, TERRAIN_SEGS);
-const terrainCols = new Float32Array(SEGS1 * SEGS1 * 3);
-for (let i = 0; i < SEGS1 * SEGS1; i++) { terrainCols[i*3] = 0.23; terrainCols[i*3+1] = 0.33; terrainCols[i*3+2] = 0.21; }
-terrainGeo.setAttribute('color', new THREE.BufferAttribute(terrainCols, 3));
+// 地形の色分けマテリアル(高さ別頂点カラー)。唯一の地形メッシュ(farMesh)がこれを使う。
 const terrainMat = new THREE.MeshLambertMaterial({ vertexColors: true });
-terrainMesh = new THREE.Mesh(terrainGeo, terrainMat);
-terrainMesh.rotation.x = -Math.PI / 2;
-terrainMesh.receiveShadow = true;
-terrainMesh.renderOrder = 0;
-scene.add(terrainMesh);
 
-// 遠景の実地形データ(loadWideTerrain がバックグラウンドで代入)。
+// 遠景の実地形データ(loadWideTerrain/loadNearTerrain がバックグラウンドで代入)。
 // farNodeY が参照するため、初回 updateFarMesh(true) より前に宣言しておく(TDZ回避)。
 let wideElev = null;
 
-// ======= 遠景地形メッシュ(プレイヤー追従) =======
-// 以前は y=-0.3 の平坦な巨大平面だったため、OSM_BOUNDS 外に動的生成された
-// 道路・建物(getTerrainY はエッジの標高にクランプされる)が宙に浮き、
-// 下に地面が無い状態になっていた。道路・建物と同じ getTerrainY を
-// サンプリングする粗いメッシュをプレイヤーに追従させることで、
-// 生成物のある場所には必ず一致した高さの地面が存在するようにする。
+// ======= 地形メッシュ(プレイヤー追従、全地域共通) =======
+// 生成物(道路・建物・プレイヤー)の足元には常にこのメッシュしか存在しないため、
+// getGroundY はこのメッシュの表面(farSurfaceY)とだけ厳密に一致していればよい。
 const FAR_SIZE = 12000, FAR_SEGS = 60, FAR_SEGS1 = FAR_SEGS + 1; // 半径6km > far(5000) なので端は見えない
 const farGeo = new THREE.PlaneGeometry(FAR_SIZE, FAR_SIZE, FAR_SEGS, FAR_SEGS);
 farGeo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(FAR_SEGS1 * FAR_SEGS1 * 3), 3));
@@ -40,37 +34,24 @@ farMesh.frustumCulled = false; // 頂点変位+移動するためカリングさ
 farMesh.renderOrder = 0;
 scene.add(farMesh);
 
-// --- 遠景メッシュの高さは farNodeY / farSurfaceY に一本化する ---
+// --- 地形メッシュの高さは farNodeY / farSurfaceY に一本化する ---
 // 頂点は世界座標に固定された FAR_STEP(200m) 格子上にあり(中心スナップも FAR_STEP 単位)、
-// 「描画される遠景メッシュ表面」= farSurfaceY が返す値、が厳密に成り立つ。
+// 「描画されるメッシュ表面」= farSurfaceY が返す値、が厳密に成り立つ。
 const FAR_STEP = FAR_SIZE / FAR_SEGS; // 200m
-const FAR_Y = -0.15;                  // メッシュ全体のyオフセット(詳細地形とのz-fighting回避)
-const FAR_SINK_MARGIN = 250, FAR_SINK = 5; // 詳細地形の内側では5m沈めて重なりを防ぐ
+const FAR_Y = -0.15;                  // メッシュ全体のyオフセット
 
-// 格子ノード(i,j)の高さ(メッシュ頂点とクエリの両方がこの1つの関数を使う)
+// 格子ノード(i,j)の高さ(メッシュ頂点とクエリの両方がこの1つの関数を使う)。
+// NEAR(プレイヤー追従の高解像度グリッド)があればそれを、無ければWIDE(広域低解像度)を、
+// どちらも無ければ0mを返す(getWideTerrainY内のsampleGridが既にこの優先順位で処理する)。
 function farNodeY(i, j) {
-  const x = i * FAR_STEP, z = j * FAR_STEP;
-  // 遠方ジャンプで原点が伊勢原以外にある間は、伊勢原専用の詳細地形(getTerrainY)を
-  // 一切参照しない — ローカル原点付近は常にジャンプ先の座標になるため、詳細エリア内
-  // ブレンドをそのまま使うと伊勢原の地形形状が現在地に重なって表示されてしまう。
-  // wideElev/getWideTerrainY(その場所で実際に取得した標高データ)だけを使う。
-  if (!AT_HOME_REGION) return getWideTerrainY(x, z) || 0;
-  const inDetail = x > -WORLD_W/2 + FAR_SINK_MARGIN && x < WORLD_W/2 - FAR_SINK_MARGIN &&
-                   z > -WORLD_D/2 + FAR_SINK_MARGIN && z < WORLD_D/2 - FAR_SINK_MARGIN;
-  let h = getTerrainY(x, z); // 詳細グリッド(範囲外は縁の高さでクランプ)
-  if (inDetail) return h - FAR_SINK;
-  // 詳細範囲の外側: 遠景の実地形(wideElev)へ滑らかに遷移させ、大山や海岸を出す。
-  // wideElev 未取得時は従来どおりクランプ値のまま(安全なフォールバック)。
-  if (wideElev) {
-    const dEdge = Math.max(Math.abs(x) - (WORLD_W/2 - FAR_SINK_MARGIN),
-                           Math.abs(z) - (WORLD_D/2 - FAR_SINK_MARGIN), 0);
-    const t = Math.min(1, dEdge / 1400); // 縁から1.4kmかけて実地形へブレンド
-    h = h * (1 - t) + getWideTerrainY(x, z) * t;
-  }
-  return h;
+  // getWideTerrainY はpart6.jsで定義される。このファイル(part5.js)の末尾で行う
+  // 起動直後の初期化呼び出し(updateFarMesh(true))はpart6.js読み込み前に実行されるため、
+  // 未定義の間は0m(平坦)を返す(ReferenceError回避。typeofは未宣言識別子でも例外を投げない)。
+  if (typeof getWideTerrainY !== 'function') return 0;
+  return getWideTerrainY(i * FAR_STEP, j * FAR_STEP) || 0;
 }
 
-// 描画される遠景メッシュ表面と厳密に一致する高さ(三角形分割もPlaneGeometryと同一)
+// 描画されるメッシュ表面と厳密に一致する高さ(三角形分割もPlaneGeometryと同一)
 function farSurfaceY(x, z) {
   const i = Math.floor(x / FAR_STEP), j = Math.floor(z / FAR_STEP);
   const u = x / FAR_STEP - i, v = z / FAR_STEP - j;
@@ -97,6 +78,7 @@ function updateFarMesh(force) {
       const idx = jz * FAR_SEGS1 + jx;
       const h = farNodeY(i0 + jx, j0 + jz); // クエリと同じノード関数を使用
       pos.setZ(idx, h);
+      if (h > terrainMaxH) terrainMaxH = h; // 色の正規化用の最大高さも同じループで更新(space/edo/marchenモード)
       const c = terrainColorRGB(h);
       col.setXYZ(idx, c[0], c[1], c[2]);
     }
@@ -106,51 +88,19 @@ function updateFarMesh(force) {
   farGeo.computeVertexNormals();
 }
 
-let elevData = null;  // flat array [iz * SEGS1 + ix]
-let elevBase = 0;
-
-// 詳細地形メッシュの「描画される表面」と厳密に一致する高さを返す。
-// 修正点1: 以前はバイリニア補間だったが、実際のメッシュは三角形で描画されるため
-//   急斜面ではセル対角線上で最大数mズレて道路が埋まっていた。
-//   → PlaneGeometry と同じ対角線(b-d)の区分線形補間に変更し、ズレをゼロに。
-// 修正点2: 範囲外で fx>1 のまま線形外挿され高さが暴走していた → [0,1]にクランプ。
-function getTerrainY(x, z) {
-  if (!elevData) return 0;
-  const nx = (x + WORLD_W / 2) / WORLD_W * TERRAIN_SEGS;
-  const nz = (z + WORLD_D / 2) / WORLD_D * TERRAIN_SEGS;
-  const ix = Math.max(0, Math.min(TERRAIN_SEGS - 1, Math.floor(nx)));
-  const iz = Math.max(0, Math.min(TERRAIN_SEGS - 1, Math.floor(nz)));
-  const fx = Math.max(0, Math.min(1, nx - ix));
-  const fz = Math.max(0, Math.min(1, nz - iz));
-  const h00 = elevData[ iz    * SEGS1 + ix    ];
-  const h10 = elevData[ iz    * SEGS1 + ix + 1];
-  const h01 = elevData[(iz+1) * SEGS1 + ix    ];
-  const h11 = elevData[(iz+1) * SEGS1 + ix + 1];
-  if (fx + fz <= 1) return h00 + (h10 - h00) * fx + (h01 - h00) * fz;
-  return h11 + (h01 - h11) * (1 - fx) + (h10 - h11) * (1 - fz);
-}
+let elevBase = 0; // このリージョンの高度基準(実標高m)。establishRegionBase(part6.js)が地域ごとに確定する。
 
 // 起伏の倍率
 const ELEV_SCALE = 2.0;
 
 // ======= 「見えている地面」の高さ(生成物・プレイヤーはすべてこれを使う) =======
-// 画面に存在する地面は「詳細地形メッシュ」と「遠景地形メッシュ」の2枚。
-// getTerrainY / farSurfaceY はどちらも描画される三角形と厳密に一致するので、
-// その上側包絡線(max)に置けば、どちらのメッシュにも埋まることは構造上あり得ない。
 function getGroundY(x, z) {
-  const fy = farSurfaceY(x, z);
-  // 伊勢原以外(遠方ジャンプ後)では詳細地形メッシュ自体を使わない。理由は farNodeY 同様、
-  // ローカル原点付近=現在地になるため、伊勢原の詳細形状が現在地に重なってしまうため。
-  if (!AT_HOME_REGION) return fy;
-  const inside = x >= -WORLD_W/2 && x <= WORLD_W/2 && z >= -WORLD_D/2 && z <= WORLD_D/2;
-  return inside ? Math.max(getTerrainY(x, z), fy) : fy;
+  return farSurfaceY(x, z);
 }
 
-// 高さ→頂点カラー: 緑(低地) → 深緑(山) → 岩 → 雪。詳細地形と遠景地形で共用
+// 高さ→頂点カラー: 緑(低地) → 深緑(山) → 岩 → 雪
 let terrainMaxH = 1;
-// 岩・雪・森林限界の境界(ゲーム高さ)。実標高(m)基準で loadElevations が設定する。
-// 以前は「詳細エリアの最大高」で正規化していたため、遠景の実際の高山(大山1252m)が
-// 正規化1.0を超えて全部「白い岩」になり、森も詳細エリアの縁で途切れていた。
+// 岩・雪・森林限界の境界(ゲーム高さ)。実標高(m)基準で establishRegionBase(part6.js)が設定する。
 // 実標高基準にして、山は中腹まで緑・森、岩と雪は本当に高い所だけにする。
 let ROCK_Y = 1e9, SNOW_Y = 1e9, TREELINE = 1e9;
 function terrainColorRGB(h) {
@@ -163,42 +113,8 @@ function terrainColorRGB(h) {
   if (h < SNOW_Y) { const k = (h - ROCK_Y) / Math.max(1, SNOW_Y - ROCK_Y);       return [0.15 + 0.32*k, 0.26 + 0.22*k, 0.13 + 0.22*k]; } // 岩肌
   const k = Math.min(1, (h - SNOW_Y) / Math.max(1, SNOW_Y - ROCK_Y));            return [0.55 + 0.35*k, 0.58 + 0.32*k, 0.56 + 0.38*k];   // 雪
 }
-// 起動直後も緑の地面で初期化(elevData ロード後に applyTerrain が再サンプリングする)
+// 起動直後も緑の地面で初期化(NEAR/WIDE取得後、updateFarMeshが再サンプリングする)
 updateFarMesh(true);
-
-// elevData を terrainGeo に反映(頂点高さ+高さ別カラー+法線+バウンディング再計算)
-function applyTerrain() {
-  const posAttr = terrainGeo.attributes.position;
-  const colAttr = terrainGeo.attributes.color;
-  terrainMaxH = 1;
-  for (const h of elevData) terrainMaxH = Math.max(terrainMaxH, h);
-  for (let i = 0; i < elevData.length; i++) {
-    const h = elevData[i];
-    posAttr.setZ(i, h); // メッシュ回転前のローカルZ → ワールドY
-    const c = terrainColorRGB(h);
-    colAttr.setXYZ(i, c[0], c[1], c[2]);
-  }
-  posAttr.needsUpdate = true;
-  colAttr.needsUpdate = true;
-  terrainGeo.computeVertexNormals();
-  terrainGeo.computeBoundingSphere(); // 頂点変位後に再計算しないとカリング判定が狂う
-  updateFarMesh(true); // 遠景地形も新しい標高で再サンプリング
-}
-
-// API失敗時のフォールバック — 北西(大山方面)に向かって高くなる擬似地形
-function proceduralElevs(elevs) {
-  for (let iz = 0; iz < SEGS1; iz++) {
-    for (let ix = 0; ix < SEGS1; ix++) {
-      const wx = -WORLD_W/2 + ix * WORLD_W / TERRAIN_SEGS;
-      const wz = -WORLD_D/2 + iz * WORLD_D / TERRAIN_SEGS;
-      const fx = (wx + WORLD_W/2) / WORLD_W; // 0=西
-      const fz = (wz + WORLD_D/2) / WORLD_D; // 0=北
-      const mountain = Math.pow(Math.max(0, 1 - (fx*1.4 + fz*0.9)), 2) * 350;
-      const rolling = (Math.sin(wx*0.004)*Math.cos(wz*0.003) + Math.sin(wx*0.011+1.7)*Math.cos(wz*0.009+0.6)*0.5) * 12 + 14;
-      elevs[iz * SEGS1 + ix] = Math.max(0, mountain + rolling);
-    }
-  }
-}
 
 // 同時実行数を絞ってバッチ処理する小さなワーカープール。
 // 標高取得を Promise.all で無制限に並列発行していたところ、遠景の高解像度化(WIDE_SEGS増)
@@ -223,7 +139,6 @@ async function runLimited(items, worker, limit = FETCH_CONCURRENCY) {
 
 // ======= 国土地理院(GSI)標高タイル =======
 // opentopodataには「1リクエスト/秒・1リクエスト最大100地点・1日最大1000コール」の制限があり、
-// 初回起動だけで約21コール(初期7+遠景9+NEAR5)、移動のたびにさらに消費するため、
 // 「地形待ち→道路・建物生成が全部ゲートされて遅い」の根本原因だった。
 // 日本国内では国土地理院の標高タイル(dem_png: DEM10B相当、z14、約10mメッシュ)を
 // 並列取得する。レート制限・日次上限が無く、地形読み込みが数十秒→数秒になる。
@@ -297,58 +212,4 @@ async function fetchElevationsGSI(latlons) {
   } catch (e) {
     return null; // ネットワークエラー等 → 呼び出し側で opentopodata にフォールバック
   }
-}
-
-async function loadElevations() {
-  showToast('🏔 地形データ取得中...', { sticky: true });
-  // Build lat/lon for each vertex
-  // PlaneGeometry vertex (ix, iz): worldX = -W/2 + ix*W/SEGS, worldZ = -D/2 + iz*D/SEGS
-  const latlons = [];
-  for (let iz = 0; iz < SEGS1; iz++) {
-    for (let ix = 0; ix < SEGS1; ix++) {
-      const wx = -WORLD_W/2 + ix * WORLD_W / TERRAIN_SEGS;
-      const wz = -WORLD_D/2 + iz * WORLD_D / TERRAIN_SEGS;
-      latlons.push(xzToLatLon(wx, wz));
-    }
-  }
-  const elevs = new Array(latlons.length).fill(0);
-  let ok = true;
-  // まず国土地理院タイルから並列取得(数秒)。国外・失敗時のみopentopodata(直列・低速)へ
-  const gsi = await fetchElevationsGSI(latlons);
-  if (gsi) {
-    for (let i = 0; i < elevs.length; i++) elevs[i] = gsi[i] || 0; // データ無し(海上)は0m
-  } else try {
-    // バッチを少数ずつ並列発行する(FETCH_CONCURRENCY件まで)。opentopodataの1req/秒
-    // レート制限は server/server.js のプロキシ側(scheduleUpstream)が直列キューで既に
-    // 守っているため、クライアント側でさらに1.1秒ずつ待つのは二重の待機だった。
-    // ただし無制限に同時発行するとプロキシ/サーバーが詰まるため、少数の同時実行数に絞る。
-    const batches = [];
-    for (let i = 0; i < latlons.length; i += 100) batches.push(latlons.slice(i, i + 100));
-    const results = await runLimited(batches, batch => {
-      const locStr = batch.map(ll => `${ll.lat.toFixed(6)},${ll.lon.toFixed(6)}`).join('|');
-      return fetch(`https://api.opentopodata.org/v1/srtm30m?locations=${encodeURIComponent(locStr)}`).then(r => r.json());
-    });
-    results.forEach((json, bi) => {
-      if (json && json.results) json.results.forEach((r, j) => { elevs[bi*100 + j] = r.elevation || 0; });
-      else ok = false; // 429等 — 失敗分は0のままだが、ok=falseで下のprocedural地形に総入れ替えされる
-    });
-  } catch(e) { ok = false; }
-
-  if (!ok) {
-    showToast('⚠️ 地形API失敗 - 擬似地形を生成');
-    proceduralElevs(elevs);
-  }
-
-  elevBase = Math.min(...elevs);
-  // 岩・雪・森林限界の高さ境界を実標高基準で確定(applyTerrain の着色前に必要)。
-  // 本州中部の森林限界は約2500m。丹沢(〜1673m)・大山(1252m)はこれより低く、頂上まで森。
-  ROCK_Y   = (2500 - elevBase) * ELEV_SCALE; // これ以上で岩肌(この一帯には基本存在しない)
-  SNOW_Y   = (2900 - elevBase) * ELEV_SCALE; // これ以上で雪
-  TREELINE = (2500 - elevBase) * ELEV_SCALE; // 森林限界≈2500m。大山・丹沢は全山が森になる
-  elevData = elevs.map(e => Math.max(0, e - elevBase) * ELEV_SCALE);
-  applyTerrain();
-  // 地形確定後、松明ライトを地表の高さに再配置(固定y=4のままだと丘に埋まる)
-  torchLights.forEach(l => { l.position.y = getGroundY(l.position.x, l.position.z) + 4; });
-  initDistantSea(); // elevBase 確定後に海面を作る
-  if (ok) showToast('🏔 地形反映完了');
 }
