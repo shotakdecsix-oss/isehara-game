@@ -68,6 +68,13 @@ function jumpToLatLon(toLat, toLon) {
   // マップジャンプは高確率でNEARグリッドの範囲外になるので、こちらは毎回無条件で取り直す
   // (範囲が狭く数秒〜十秒程度で終わるため、ジャンプ直後に足元の高解像度地形をすぐ用意できる)
   loadNearTerrain(pos.x, pos.z);
+  // 【重要】国別建物スタイル(currentCountryCode)は通常、移動距離・時間の両方が閾値を超えた
+  // 時だけ更新される(checkAddressDisplayのスロットル)。マップジャンプは一瞬で数百〜数千km
+  // 移動するため、このスロットルを待つと「ジャンプ直後に生成される建物」が前の国のスタイルの
+  // まま焼き込まれてしまう(後から国コードが更新されても既存の建物は再生成されない)。
+  // ジャンプ時だけはスロットルを無視して即座に住所・国コードを取り直す。
+  lastAddrX = pos.x; lastAddrZ = pos.z; // 直後の周期チェックでの二重取得を防ぐ
+  updateAddressDisplay();
   setTimeout(() => mapOverlay.classList.remove('active'), 300);
 }
 

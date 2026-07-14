@@ -140,8 +140,13 @@ function addBuilding(x, z, w, d, h, style, isReal) {
   // ---- 敷地の余白(lotPadding。国プロファイル限定・実測OSM建物のみ) ----
   // 建物本体のフットプリント・位置には一切触れず、周囲に芝生/舗装の縁取りを追加描画するだけ。
   // 香港のように余白がほぼ無い国では実質発生せず、アメリカのように広い国だけ効いて見える。
-  // 建物が多いエリアでは描画コストを抑えるため detailOK() でも間引く(既存の庇・屋上設備と同基準)。
-  if (isReal && cprof && cprof.lotPaddingRange && detailOK()) {
+  // 【重要】実機検証で、米国プロファイル(広い余白)をニューヨークの高層ビル街にそのまま
+  // 適用すると、高層ビル1棟ごとに追加メッシュが生成され続けてレンダラーが完全にフリーズする
+  // 不具合が確認された。高層ビルに庭の余白があるのはそもそも不自然なので高さでスキップし、
+  // かつ国・密度を問わない固定予算(lotPaddingBudget)でも歯止めをかける(detailOK()の850は
+  // 他の装飾と共有の閾値で緩すぎ、今回の不具合の主因だった)。
+  const LOT_PADDING_MAX_H = 15;
+  if (isReal && cprof && cprof.lotPaddingRange && h < LOT_PADDING_MAX_H && lotPaddingBudget > 0 && detailOK()) {
     const [padMin, padMax] = cprof.lotPaddingRange;
     const pad = padMin + Math.random() * (padMax - padMin);
     if (pad > 0.05) {
@@ -151,6 +156,7 @@ function addBuilding(x, z, w, d, h, style, isReal) {
         { x: x + hw, z: z + hd }, { x: x - hw, z: z + hd },
       ];
       buildTerrainFollowingAreaPoly(padPts, lambertMat(cprof.lotSurfaceColor || 0x5a8a3d), 0.05, Math.max(hw, hd) * 2, false);
+      lotPaddingBudget--;
     }
   }
 
