@@ -519,6 +519,10 @@ async function loadOSM(preFetchedData) {
   // 周囲に田畑があるエリアは被覆率に関わらず高層化しない(理由・格子サイズは
   // part2.js computeFarmlandCells参照。伊勢原の駅前が高層化されすぎる不具合の対策)。
   const farmlandCells = MODE === 'real' ? computeFarmlandCells(data.elements) : null;
+  // 至近距離に駅が複数あるエリア(ターミナル駅)は強制的に高層ビル区域にする
+  // (part2.js isStationHubNear参照。東京・NY等で被覆率判定だけでは高層化が
+  // 発動しないケースへの対策)。
+  const stationPoints = MODE === 'real' ? computeStationPoints(data.elements) : null;
   data.elements.forEach(el => {
     if (el.type !== 'way') return;
     const tags = el.tags || {};
@@ -558,7 +562,7 @@ async function loadOSM(preFetchedData) {
       // building:levelsタグが無い場合の階数フォールバック。国プロファイルのlevelsRangeが
       // あればそれを使う(香港は塔状に高め、アメリカ郊外は低めに寄る)。無ければ従来通り1〜3階。
       // cprofH はこの建物の重心が属するセルの被覆率で1棟ごとに決める(バッチ全体の平均ではない)。
-      const cprofH = localDensityProfileAt(cprofHBase, densityGrid, cx, cz, farmlandCells);
+      const cprofH = localDensityProfileAt(cprofHBase, densityGrid, cx, cz, farmlandCells, stationPoints);
       const [lvMin, lvMax] = (cprofH && cprofH.levelsRange) || [1, 3];
       const levels = parseInt(tags['building:levels']) || (lvMin + Math.floor(Math.random() * (lvMax - lvMin + 1)));
       let h = resolvedH != null ? resolvedH : Math.max(levels * 3, 3) + Math.random()*2;

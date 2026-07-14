@@ -95,6 +95,9 @@ function processTileData(data, tileCount) {
   const densityGrid8 = MODE === 'real' ? computeLocalDensityGrid(data.elements) : null;
   // 周囲に田畑があるエリアは被覆率に関わらず高層化しない(part2.js computeFarmlandCells参照)。
   const farmlandCells8 = MODE === 'real' ? computeFarmlandCells(data.elements) : null;
+  // 至近距離に駅が複数あるエリア(ターミナル駅)は強制的に高層ビル区域にする
+  // (part2.js isStationHubNear参照。東京・NY等の対策)。
+  const stationPoints8 = MODE === 'real' ? computeStationPoints(data.elements) : null;
   // 駅ランドマーク(初期範囲の外にある駅も、タイルが届いた時点でここで拾う)
   processStationNodes(data.elements);
   // Roads
@@ -173,7 +176,7 @@ function processTileData(data, tileCount) {
     // 呼ばれる経路で、part6.js側だけに国プロファイルを配線していたため、ジャンプ直後の
     // 初期範囲を過ぎて歩き回った先の建物には反映されていなかった(香港で歩き続けると
     // 低層タグの建物がまた出る不具合の原因)。
-    const cprofH8 = localDensityProfileAt(cprofH8Base, densityGrid8, cx, cz, farmlandCells8);
+    const cprofH8 = localDensityProfileAt(cprofH8Base, densityGrid8, cx, cz, farmlandCells8, stationPoints8);
     const [lvMin8, lvMax8] = (cprofH8 && cprofH8.levelsRange) || [1, 3];
     const levels = parseInt(tags['building:levels']) || (lvMin8 + Math.floor(Math.random() * (lvMax8 - lvMin8 + 1)));
     let h = resolvedH != null ? resolvedH : Math.max(levels*3,3)+Math.random()*2;

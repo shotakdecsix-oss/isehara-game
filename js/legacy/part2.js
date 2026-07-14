@@ -536,11 +536,49 @@ function hasFarmlandNear(farmlandCells, x, z) {
       if (farmlandCells.has((gx + dx) + ',' + (gz + dz))) return true;
   return false;
 }
+// ======= 駅密集(ターミナル駅)による強制高層化(2026-07-14) =======
+// 【経緯】250mセルの被覆率判定だけだと、東京・NYのような真の都心部でも、広い道路・
+// 広場を含むセルでは被覆率が閾値(0.22)を割り、denseHighRise化が発動しないケースが
+// 実機で多く残った(footprint近似の精度限界)。ユーザー提案: 「駅が複数集まっている
+// エリアは強制的に高層ビル区域にする」— 新宿・渋谷・東京や、グランドセントラル・
+// ユニオンスクエア等の主要ターミナルは、JR・私鉄・地下鉄の各事業者が別々のnodeとして
+// 隣接して打たれていることが多く(=同じ場所に複数の駅ノード)、「至近距離に複数の駅」は
+// 被覆率よりもずっと当てにできる「ここは正真正銘の都心」シグナルになる。
+// 駅ノード自体はOSM_TILE_CLAUSES/初期クエリで既に取得済み(railway=station/halt,
+// public_transport=station)なので、新たな通信は増やさない。
+const STATION_HUB_RADIUS_M = 400; // 「至近距離」の半径
+const STATION_HUB_MIN_COUNT = 2;  // これ以上の駅ノードが半径内にあればターミナル駅とみなす
+// elements内の駅ノード(railway=station/halt, public_transport=station)の座標一覧を作る。
+function computeStationPoints(elements) {
+  const pts = [];
+  for (const el of elements) {
+    if (el.type !== 'node' || !el.tags) continue;
+    const t = el.tags;
+    if (t.railway === 'station' || t.railway === 'halt' || t.public_transport === 'station') {
+      pts.push(latLonToXZ(el.lat, el.lon));
+    }
+  }
+  return pts;
+}
+// 座標(x,z)の半径STATION_HUB_RADIUS_M以内に、駅ノードがSTATION_HUB_MIN_COUNT個以上あるか。
+// (駅の総数は1バッチあたり多くても数十件程度なので、建物ごとの線形走査で十分軽い)
+function isStationHubNear(stations, x, z) {
+  if (!stations || stations.length < STATION_HUB_MIN_COUNT) return false;
+  const r2 = STATION_HUB_RADIUS_M * STATION_HUB_RADIUS_M;
+  let n = 0;
+  for (const s of stations) {
+    const dx = s.x - x, dz = s.z - z;
+    if (dx * dx + dz * dz <= r2 && ++n >= STATION_HUB_MIN_COUNT) return true;
+  }
+  return false;
+}
 // 指定座標(建物の重心x,z)が属するセルの被覆率で、その建物1棟分のプロファイルを決める。
 // gridがnull(現実モード以外、またはOSM要素が無いバッチ)ならbaseProfileをそのまま返す。
 // セル面積は常にDENSITY_CELL_M四方の固定値(セル自体の大きさは地理的に変わらないため)。
-// farmlandCellsを渡すと、周囲に田畑があるエリアは被覆率に関わらず高層化を見送る。
-function localDensityProfileAt(baseProfile, grid, x, z, farmlandCells) {
+// 判定の優先順位: ①ターミナル駅近接(最有力の都心シグナル。田畑近接より優先)
+// →②田畑近接(高層化を抑制)→③250mセルの被覆率(通常の判定)。
+function localDensityProfileAt(baseProfile, grid, x, z, farmlandCells, stations) {
+  if (isStationHubNear(stations, x, z)) return REGION_PROFILES.denseHighRise;
   if (hasFarmlandNear(farmlandCells, x, z)) return baseProfile; // 田畑近接 → 高層化しない
   if (!grid) return baseProfile;
   const key = Math.floor(x / DENSITY_CELL_M) + ',' + Math.floor(z / DENSITY_CELL_M);
