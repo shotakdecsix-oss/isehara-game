@@ -156,9 +156,20 @@ function processTileData(data) {
     let style = getBuildingStyle(tags);
     if (MODE === 'edo' && shouldSkipEdoBuilding(style)) return; // 江戸: 現代の建物密度をそのまま使わず間引く
     const resolvedH = resolveBuildingHeight(tags);
-    const levels = parseInt(tags['building:levels']) || 1+Math.floor(Math.random()*3);
+    // 国プロファイルの階数フォールバック・最低階数floor(part6.js PASS-2と同じロジック)。
+    // 【重要】ここ(part8.js)はプレイヤーが移動して新しいOSMタイルを取得するたびに
+    // 呼ばれる経路で、part6.js側だけに国プロファイルを配線していたため、ジャンプ直後の
+    // 初期範囲を過ぎて歩き回った先の建物には反映されていなかった(香港で歩き続けると
+    // 低層タグの建物がまた出る不具合の原因)。
+    const cprofH8 = MODE === 'real' ? getCountryBuildingProfile(currentCountryCode) : null;
+    const [lvMin8, lvMax8] = (cprofH8 && cprofH8.levelsRange) || [1, 3];
+    const levels = parseInt(tags['building:levels']) || (lvMin8 + Math.floor(Math.random() * (lvMax8 - lvMin8 + 1)));
     let h = resolvedH != null ? resolvedH : Math.max(levels*3,3)+Math.random()*2;
     h = applyLandmarkMinHeight(style, h); // 学校・病院・役場・神社仏閣は最低限の高さを確保
+    const _landmarkType8 = style && (style.type === 'shrine' || style.type === 'temple' || style.type === 'church');
+    if (cprofH8 && cprofH8.minLevels && !_landmarkType8) {
+      h = Math.max(h, cprofH8.minLevels * 3);
+    }
     style = classifyResidential(style, w, d, h);
     let fw = w, fd = d, fh = h;
     ({ w: fw, d: fd, h: fh } = applySizeFloor(style, w, d, h)); // マンション・工場は最低サイズを底上げ

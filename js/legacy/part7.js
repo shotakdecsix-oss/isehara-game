@@ -62,8 +62,20 @@ let leafletMap = null, playerMarker = null;
 const mapOverlay = document.getElementById('mapOverlay');
 const mapHintEl = document.getElementById('mapHint');
 
+// 経度を-180〜180の範囲に正規化する。
+// 【背景】Leafletの地図は横方向に無限スクロール可能(世界地図のコピーが繰り返し表示される)
+// ため、日本から大きく離れた場所(米国など)をタップすると、クリックイベントの経度が
+// 正規化されずに返ってくることがある(例: 実際は-74.15度の場所なのに285.85度で来る)。
+// これをそのままプレイヤーのワールド座標に焼き込むと、以後そこから逆算する緯度経度
+// (標高API・Nominatim逆ジオコーディング・Overpass等すべて)も範囲外の経度のままになり、
+// 「地形が取得できない」「住所不明」といった一見無関係に見える不具合が連鎖して起きる。
+// ジャンプの入口(このファイル内の全ジャンプ経路が集約するjumpToLatLon)で一度だけ
+// 正規化しておけば、以降の計算はすべて正しい範囲の経度を使うようになる。
+function wrapLon(lon) { return ((lon + 180) % 360 + 360) % 360 - 180; }
+
 // 指定の緯度経度へジャンプ(地図タップ・地名検索・現在地ボタンの共通処理)
 function jumpToLatLon(toLat, toLon) {
+  toLon = wrapLon(toLon);
   const pos = latLonToXZ(toLat, toLon);
   player.position.set(pos.x, 0, pos.z); // yはanimateの床追従が合わせる
   if (playerMarker) { playerMarker.setLatLng([toLat, toLon]); playerMarker.openPopup(); }
