@@ -352,6 +352,23 @@ async function fetchOSMData() {
   return null; // 3回とも失敗した場合のみフォールバックマップを使う
 }
 
+// モード切替リロード(VISUAL_MODES切替ボタン、part1.js)での再開先が原点から遠い場合、
+// jumpToLatLon(part7.js)の遠距離ジャンプと同じ理由(float32精度によるちらつき対策)で
+// 原点を付け替える。ここはページの再読み込み直後(フレッシュな実行環境)なので、
+// jumpToLatLonのように「保存してリロード」する必要はなく、その場で付け替えるだけでよい。
+// ただし markInitialTiles()(part8.js、このスクリプト読み込み時点で「原点=伊勢原」前提で
+// fetchedOSMTiles/loadedOSMTilesに伊勢原分のタイルを登録済み)は原点付け替え前の登録なので、
+// 付け替えたらその登録もclearしないと、新しい地域なのに「タイル取得済み」と誤判定されて
+// 何も新しく読み込まれない(jumpToLatLonの遠距離ジャンプで実機確認済みの不具合と同じ原因)。
+function recenterForResumeIfFar(lat, lon) {
+  const dist = Math.hypot((lon - MID_LON) * SCALE * COS_LAT, (lat - MID_LAT) * SCALE);
+  if (dist > RECENTER_DIST_M) {
+    recenterOrigin(lat, lon);
+    fetchedOSMTiles.clear();
+    loadedOSMTiles.clear();
+  }
+}
+
 // data を省略した場合は自分で fetchOSMData() する(従来どおりの単体呼び出しにも対応)
 async function loadOSM(preFetchedData) {
   const data = preFetchedData !== undefined ? preFetchedData : await fetchOSMData();
@@ -512,6 +529,7 @@ async function loadOSM(preFetchedData) {
   // モード切替リロードなら切替前の位置・向きから再開、通常起動は東成瀬2-2-11にスポーン
   const resume = consumeResumePos();
   if (resume) {
+    recenterForResumeIfFar(resume.lat, resume.lon);
     const rp = latLonToXZ(resume.lat, resume.lon);
     player.position.set(rp.x, 0, rp.z); // yはanimateの床追従が地形/屋根に合わせる
     if (typeof resume.yaw === 'number') camYaw = resume.yaw;
@@ -549,6 +567,7 @@ function buildFallbackMap() {
   showToast('✨ ChronoDriftの世界（フォールバック）へようこそ！', { duration: 3000 });
   const resume2 = consumeResumePos();
   if (resume2) {
+    recenterForResumeIfFar(resume2.lat, resume2.lon);
     const rp2 = latLonToXZ(resume2.lat, resume2.lon);
     player.position.set(rp2.x, 0, rp2.z);
     if (typeof resume2.yaw === 'number') camYaw = resume2.yaw;

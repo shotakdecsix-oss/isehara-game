@@ -73,17 +73,39 @@ const mapHintEl = document.getElementById('mapHint');
 // 正規化しておけば、以降の計算はすべて正しい範囲の経度を使うようになる。
 function wrapLon(lon) { return ((lon + 180) % 360 + 360) % 360 - 180; }
 
+// 原点(MID_LAT/MID_LON)を付け替えるべきほど遠い移動かどうかの判定に使う距離(メートル)。
+// 【重要】WIDE_W(遠景グリッド再取得の判定、約±11.7km)とは意図的に別の、ずっと大きい閾値にする。
+// 経緯: 最初はWIDE再取得と同じ条件で原点を付け替えていたが、それだと通常起動時のデフォルト
+// スポーン(現在地 or 東京駅、伊勢原から約数十km)でも毎回「遠い」と判定されてしまい、後述の
+// リロード方式と組み合わせると起動のたびに無駄なリロードが発生してしまう。float32精度の実害
+// (地面・道路・樹木のちらつき)は数百km以上離れて初めて視認できるレベルになるため、
+// 「国・地域をまたぐレベルの移動」だけを対象にする300kmを閾値にする。
+const RECENTER_DIST_M = 300000;
+
 // 指定の緯度経度へジャンプ(地図タップ・地名検索・現在地ボタンの共通処理)
 function jumpToLatLon(toLat, toLon) {
   toLon = wrapLon(toLon);
-  let pos = latLonToXZ(toLat, toLon);
-  // 遠景(FAR)グリッドを作り直すほど遠くへ飛ぶ場合は「別の地域への移動」とみなし、原点そのものを
-  // ジャンプ先へ付け替える(recenterOrigin、part4.js)。これでプレイヤーのローカル座標が原点から
-  // 巨大な数値になることがなくなり、地面・道路・樹木のちらつき(float32精度切れ)を防げる。
-  // 近距離のジャンプ(地図タップで近所へ移動等)では原点を動かさない(既存挙動を維持)。
+  const distFromOrigin = Math.hypot((toLon - MID_LON) * SCALE * COS_LAT, (toLat - MID_LAT) * SCALE);
+  if (distFromOrigin > RECENTER_DIST_M) {
+    // 【重要】原点をその場で付け替えるだけだと、タイル取得済みフラグ(fetchedOSMTiles等)や
+    // チャンク読み込み済みフラグが「絶対座標」基準のまま古い原点(伊勢原)向けに残ってしまい、
+    // 新しい地域なのに「取得済み」と誤判定されて何も新しく読み込まれず、結果的に前の場所の
+    // 表示のまま止まる不具合が実機で確認された(座標系だけ動かして中身の状態を動かさなかった
+    // のが原因)。生きたセッション内で建物・道路・タイル・チャンクの状態を漏れなく手動で
+    // 洗い出して消すのは不具合の温床になりやすいため、モード切替(VISUAL_MODES切替ボタン、
+    // part1.js)で既に使っている「現在地・向きを保存してリロード」という実績のある方式に乗せ、
+    // フレッシュなJS実行環境(空のSet/Map/シーン)に後始末を任せる。
+    try {
+      localStorage.setItem('iseharaResumePos',
+        JSON.stringify({ lat: toLat, lon: toLon, yaw: camYaw, rot: player.rotation.y }));
+    } catch (e) {}
+    location.reload();
+    return;
+  }
+  const pos = latLonToXZ(toLat, toLon);
+  // 遠景(FAR)グリッドを作り直すほど遠くへ飛ぶか(原点付け替えは無いが近隣の地形は取り直す必要がある)
   const farJump = !wideElev ||
     Math.abs(pos.x - wideCX) > WIDE_W * 0.32 || Math.abs(pos.z - wideCZ) > WIDE_D * 0.32;
-  if (farJump) { recenterOrigin(toLat, toLon); pos = latLonToXZ(toLat, toLon); }
   player.position.set(pos.x, 0, pos.z); // yはanimateの床追従が合わせる
   if (playerMarker) { playerMarker.setLatLng([toLat, toLon]); playerMarker.openPopup(); }
   if (leafletMap) leafletMap.setView([toLat, toLon], leafletMap.getZoom());
