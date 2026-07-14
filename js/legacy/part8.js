@@ -285,6 +285,13 @@ async function fetchOSMTileBatch() {
       osmTileFailCount.delete(k);
       loadedOSMTiles.add(k); // このタイルの道路が確定 → 建物生成待ちのチャンクを解放してよい
     });
+    // 遠方ジャンプ後、伊勢原の初期ワールド構築をスキップした再開(part6.js loadOSM参照)では
+    // 「目的地の地図を読み込み中...」のstickyトーストを出したまま。プレイヤーの現在地タイルが
+    // 届いた時点で、これを完了メッセージに差し替える(でなければ静的プレースホルダのまま残る)。
+    if (awaitingDestinationLoad && keys.includes(ptKey)) {
+      awaitingDestinationLoad = false;
+      showToast('✨ 目的地の地図を表示しました', { duration: 3000 });
+    }
   } catch(e) {
     // 以前は3回失敗すると完全に諦めて二度と再試行しなかったため、Overpassが一時的に
     // 混雑していただけの場合でも「その区画だけ永久に道路が途切れる」ことがあった。
@@ -297,6 +304,12 @@ async function fetchOSMTileBatch() {
       if (n >= 4) loadedOSMTiles.add(k); // これ以上は建物生成をブロックしない(道路は背景で取得を続ける)
       fetchedOSMTiles.delete(k); // 常に再試行対象に戻す(checkOSMTiles が再度キューに積む)
     });
+    // 現在地タイルが4回失敗して「諦めて先に進む」扱いになった場合も、sticky状態のトーストを
+    // 出しっぱなしにしない(Overpass不調が長引くと「目的地の地図を読み込み中...」が永久に残るため)。
+    if (awaitingDestinationLoad && loadedOSMTiles.has(ptKey)) {
+      awaitingDestinationLoad = false;
+      showToast('⚠️ 目的地の地図取得が一部失敗しました(背景で再試行を続けます)', { duration: 4000 });
+    }
   }
   // 失敗するたびに待ち時間を延ばす(最大30秒)。連続失敗中の無駄な連打を防ぎつつ、
   // 一時的な混雑が収まれば自動的に復帰して歯抜けが埋まる。

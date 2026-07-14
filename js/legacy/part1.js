@@ -95,7 +95,12 @@ if (USES_MEIJI_LANDUSE) {
 
 // ======= SCENE SETUP =======
 const canvas = document.getElementById('canvas');
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+// logarithmicDepthBuffer: 標準の深度バッファは近い場所(near付近)に精度が偏り、遠い/高い場所ほど
+// 精度が急激に粗くなる。このゲームはnear=0.5〜far=5000(比が1万倍)と幅が広く、上空へ上昇して
+// カメラ〜地形間の距離が伸びるほど、地形と海面のような近接した2枚のポリゴンがz-fighting
+// (どちらが手前か毎フレーム入れ替わってちらつく)しやすくなる。対数深度バッファは全体に精度を
+// 均等に配分するため、この「高度が上がるほどちらつきが悪化する」症状に直接効く。
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, logarithmicDepthBuffer: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 // 影を無効化 — 3000m範囲を1024pxで描く影は約3m/texelでほぼ視認できず、

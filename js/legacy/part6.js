@@ -53,6 +53,12 @@ let SEA_Y = 0;                // 海面(seaLevelM)のゲーム高さ。SEA_Y = (
 // 「明確に別の地域に移った(=recenterOriginが呼ばれた)時だけ」基準を確定し直す。
 let regionBaseReady = false;
 
+// 遠方ジャンプ後の再開時、目的地のOSMタイル(part8.js)が届くまで表示するsticky状態メッセージが
+// まだ出ているかどうか。true の間、プレイヤーの現在地タイルが届いた時点で完了メッセージに
+// 差し替える(fetchOSMTileBatch参照)。以前はここでどのshowToastも呼ばれず、起動直後の
+// 静的プレースホルダ文言(index.html「🗺 伊勢原マップ読み込み中...」)がずっと残ってしまっていた。
+let awaitingDestinationLoad = false;
+
 // NEARグリッドの生データ(raw、null=データ無し地点を含む)から、この地域の高度基準(elevBase)と、
 // それに連動する岩・雪・森林限界のしきい値・海面のゲーム高さを確定する。伊勢原本体だけでなく、
 // 遠方ジャンプで来た新しい地域でも同じロジックで確定し直す(地域専用の特別扱いをしない)。
@@ -417,6 +423,11 @@ async function loadOSM(preFetchedData) {
     if (typeof resume.yaw === 'number') camYaw = resume.yaw;
     if (typeof resume.rot === 'number') player.rotation.y = resume.rot;
     initialWorldLoaded = true;
+    // 【重要】ここを通ると伊勢原の初期ワールド構築(→完了時のshowToast)を丸ごとスキップするため、
+    // 起動時の静的プレースホルダ文言(index.html「🗺 伊勢原マップ読み込み中...」)を明示的に
+    // 置き換えないと、実際には目的地のOSMタイル取得(part8.js)が進んでいてもずっと表示され続ける。
+    showToast('🗺 目的地の地図を読み込み中...', { sticky: true });
+    awaitingDestinationLoad = true;
     return;
   }
   const data = preFetchedData !== undefined ? preFetchedData : await fetchOSMData();
