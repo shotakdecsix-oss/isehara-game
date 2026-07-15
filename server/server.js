@@ -150,8 +150,13 @@ function scheduleUpstream(host, task) {
   return p;
 }
 
-/* ---------- 上流 GET (標準 https、リトライ付き) ---------- */
-function httpsGetOnce(urlStr) {
+/* ---------- 上流リクエスト (標準 https、GET/POST両対応、リトライ付き) ---------- */
+// 【重要・2026-07-15】以前はhttps.getのみでGET専用だった。Overpassの6タイルまとめクエリは
+// URLに埋め込む(GET)と数千文字になり、overpass-api.deから414 (Request-URI Too Long)を
+// 返される事象を確認(道路の拡張生成が完全に止まって見えた真因。詳細はpart8.js側コメント参照)。
+// POST(ボディにdata=<クエリ>)はURL長に依存しないため、GET/POST両対応に拡張する。
+function httpsRequestOnce(urlStr, opts) {
+  opts = opts || {};
   return new Promise((resolve, reject) => {
     let settled = false;
     const settle = (fn, arg) => { if (settled) return; settled = true; clearTimeout(hardTimer); fn(arg); };
@@ -165,7 +170,10 @@ function httpsGetOnce(urlStr) {
       req.destroy();
       settle(reject, new Error('upstream hard timeout (' + (UPSTREAM_TIMEOUT_MS + 15000) + 'ms)'));
     }, UPSTREAM_TIMEOUT_MS + 15000);
-    const req = https.get(urlStr, { headers: { 'User-Agent': 'chronodrift-proxy/1.0' } }, (res) => {
+    const method = opts.method || 'GET';
+    const headers = Object.assign({ 'User-Agent': 'chronodrift-proxy/1.0' }, opts.headers || {});
+    if (opts.body) headers['Content-Length'] = Buffer.byteLength(opts.body);
+    const req = https.request(urlStr, { method, headers }, (res) => {
       const chunks = [];
       res.on('data', (c) => chunks.push(c));
       res.on('end', () => settle(resolve, {
@@ -177,16 +185,19 @@ function httpsGetOnce(urlStr) {
     });
     req.setTimeout(UPSTREAM_TIMEOUT_MS, () => req.destroy(new Error('upstream timeout')));
     req.on('error', (e) => settle(reject, e));
+    if (opts.body) req.write(opts.body);
+    req.end();
   });
 }
 
 async function fetchUpstream(upstreamUrl, opts) {
-  const maxAttempts = (opts && opts.maxAttempts) || MAX_ATTEMPTS;
+  opts = opts || {};
+  const maxAttempts = opts.maxAttempts || MAX_ATTEMPTS;
   const host = new URL(upstreamUrl).host;
   let lastErr = null;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      const res = await scheduleUpstream(host, () => httpsGetOnce(upstreamUrl));
+      const res = await scheduleUpstream(host, () => httpsRequestOnce(upstreamUrl, opts));
       if (res.status === 200) return res;
       lastErr = new Error('upstream HTTP ' + res.status);
       if (res.status === 429 || res.status >= 500) {
@@ -208,11 +219,11 @@ async function fetchUpstream(upstreamUrl, opts) {
 // 全滅した場合は最後に得られたレスポンス(あれば)かエラーを返す。
 // 各ミラーは独立ホストなので scheduleUpstream のレート制限キューも別々になり、
 // 一方のホストが混雑/拒否していてももう一方には影響しない。
-async function fetchUpstreamMulti(upstreamUrls) {
+async function fetchUpstreamMulti(upstreamUrls, opts) {
   let lastRes = null, lastErr = null;
   for (const url of upstreamUrls) {
     try {
-      const res = await fetchUpstream(url, { maxAttempts: 2 });
+      const res = await fetchUpstream(url, Object.assign({}, opts, { maxAttempts: 2 }));
       if (res.status === 200) return res;
       lastRes = res;
     } catch (e) {
@@ -224,32 +235,52 @@ async function fetchUpstreamMulti(upstreamUrls) {
   throw lastErr || new Error('all overpass mirrors failed');
 }
 
+// POSTボディの読み取り(Overpassクエリ用。GET系API(elevation/nominatim)では未使用)
+function readRequestBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    req.on('error', reject);
+  });
+}
+
 /* ---------- プロキシ本体 (キャッシュ + 同時リクエスト合流) ---------- */
 const inflight = new Map();
 
 async function handleApi(req, res, apiKey) {
   const api = APIS[apiKey];
-  const rest = req.url.slice(apiKey.length); // 例: "/v1/srtm30m?locations=..." / "?data=..."
+  const rest = req.url.slice(apiKey.length); // 例: "/v1/srtm30m?locations=..." / GET系の "?data=..."
+  // 【重要・2026-07-15】Overpassの6タイルまとめクエリはGETでURLに埋め込むと414
+  // (Request-URI Too Long)を上流から返される規模になるため、クライアント側(part8.js)は
+  // POST(ボディにdata=<クエリ>)へ切り替えた。ここではPOSTならボディを読み取り、
+  // それをそのまま上流へもPOSTで転送する。キャッシュキーもURL(restは空になる)ではなく
+  // ボディ内容ベースに切り替える必要がある。
+  const reqBody = req.method === 'POST' ? await readRequestBody(req) : '';
   const upstreamUrl = api.upstream + rest;
-  const file = cachePath(api.dir, upstreamUrl);
+  const cacheKeySource = reqBody ? (upstreamUrl + '|POST|' + reqBody) : upstreamUrl;
+  const file = cachePath(api.dir, cacheKeySource);
+  const upstreamOpts = reqBody
+    ? { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: reqBody }
+    : undefined;
 
   // 1) キャッシュヒット → 即応答
   try {
     const cached = JSON.parse(await fsp.readFile(file, 'utf8'));
     res.writeHead(200, { 'Content-Type': cached.contentType, 'X-Cache': 'HIT' });
     res.end(cached.body);
-    log(`HIT  ${apiKey} ${rest.slice(0, 60)}...`);
+    log(`HIT  ${apiKey} ${(reqBody || rest).slice(0, 60)}...`);
     return;
   } catch (_) { /* miss */ }
 
-  // 2) ミス → 上流 (同一URLの同時リクエストは1本に合流)
-  let p = inflight.get(upstreamUrl);
+  // 2) ミス → 上流 (同一キーの同時リクエストは1本に合流)
+  let p = inflight.get(cacheKeySource);
   if (!p) {
     p = (async () => {
       const t0 = Date.now();
       const up = api.mirrors
-        ? await fetchUpstreamMulti(api.mirrors.map((m) => m + rest))
-        : await fetchUpstream(upstreamUrl);
+        ? await fetchUpstreamMulti(api.mirrors.map((m) => m + rest), upstreamOpts)
+        : await fetchUpstream(upstreamUrl, upstreamOpts);
       log(`MISS ${apiKey} -> upstream ${up.status} (${Date.now() - t0}ms)`);
       if (up.status === 200) {
         const bodyStr = up.body.toString('utf8');
@@ -262,8 +293,8 @@ async function handleApi(req, res, apiKey) {
       }
       return { status: up.status, contentType: up.contentType, body: up.body.toString('utf8') };
     })();
-    inflight.set(upstreamUrl, p);
-    const cleanup = () => inflight.delete(upstreamUrl);
+    inflight.set(cacheKeySource, p);
+    const cleanup = () => inflight.delete(cacheKeySource);
     p.then(cleanup, cleanup);
   }
 

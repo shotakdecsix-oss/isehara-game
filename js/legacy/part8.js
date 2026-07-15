@@ -303,7 +303,20 @@ async function fetchOSMTileBatch() {
   const abortCtl = new AbortController();
   const timeoutId = setTimeout(() => abortCtl.abort(), tileTimeoutMs);
   try {
-    const res = await fetch('https://overpass-api.de/api/interpreter?data=' + encodeURIComponent(query), { signal: abortCtl.signal });
+    // 【重要・2026-07-15】以前はGETで ?data=<クエリ> をURLに埋め込んでいたが、6タイル
+    // まとめ+多数のfeature種別(道路/建物/relation building/landuse/leisure/natural/
+    // waterway/relation water/riverbank/railway/駅/amenity...)を含むクエリはURL長が
+    // 数千文字に達し、overpass-api.deから直接 414 (Request-URI Too Long) を返される事象を
+    // 実機コンソールで確認(道路が「拡張生成が完全にストップ」していた真因。水ポリゴンは
+    // 別経路の同期処理・チャンク到達済みキャッシュ由来の描画だったため影響を受けず、
+    // 「川だけ拡張される」ように見えていた)。Overpass API公式にPOST(data=<クエリ>を
+    // ボディに)を送る方式が用意されており、URL長に一切依存しないためこちらに統一する。
+    const res = await fetch('https://overpass-api.de/api/interpreter', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'data=' + encodeURIComponent(query),
+      signal: abortCtl.signal,
+    });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
     if (!data || !data.elements) throw new Error('no elements');
