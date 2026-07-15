@@ -276,14 +276,18 @@ async function fetchOSMTileBatch() {
   });
   const query = buildOSMBatchQuery(bboxes);
   let failed = false;
+  // 【重要】以前は Promise.race([fetch(...), timeoutPromise]) で「50秒で見切る」だけだった。
+  // これはtimeoutPromise側が先に解決してcatchに落ちるだけで、負けた方のfetch自体は
+  // 中断されずバックグラウンドで生き続ける(=ブラウザの同一オリジンへの同時接続枠を
+  // 掴んだまま)。Overpass/プロキシが混雑して応答が極端に遅い状況が続くと、この
+  // 「見捨てられたが実際には終わっていないfetch」が積み重なり、ブラウザ側の接続枠を
+  // 使い果たして新規のfetchがネットワークにすら出せず永久に足踏みする
+  // (実機確認: osmTileActiveCountが2のまま固まり、成功も失敗も一切記録されない状態と一致)。
+  // AbortControllerで実際に接続を中断し、枠を確実に解放する。
+  const abortCtl = new AbortController();
+  const timeoutId = setTimeout(() => abortCtl.abort(), 50000);
   try {
-    // 【重要】ブラウザ→Overpass直接アクセス時(プロキシ迂回フォールバック)はサーバー側の
-    // 45秒タイムアウトが効かないため、ハングしたリクエストがこのワーカー枠を永久に塞ぐ。
-    // クライアント側でも50秒で見切る(失敗扱い→既存のバックオフ・再試行に乗る)。
-    const res = await Promise.race([
-      fetch('https://overpass-api.de/api/interpreter?data=' + encodeURIComponent(query)),
-      new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 50000))
-    ]);
+    const res = await fetch('https://overpass-api.de/api/interpreter?data=' + encodeURIComponent(query), { signal: abortCtl.signal });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
     if (!data || !data.elements) throw new Error('no elements');
@@ -306,6 +310,7 @@ async function fetchOSMTileBatch() {
     // 混雑していただけの場合でも「その区画だけ永久に道路が途切れる」ことがあった。
     // → 諦めきらず、間隔を伸ばしながら背景でずっと再試行し続ける。
     // (3回失敗した時点では建物生成だけ先に進めてよい扱いにし、後から道路が届いたら反映される)
+    // (AbortErrorも含め、失敗理由を問わずここに来れば必ずキューの枠を解放できる)
     failed = true;
     keys.forEach(k => {
       const n = (osmTileFailCount.get(k) || 0) + 1;
@@ -319,6 +324,8 @@ async function fetchOSMTileBatch() {
       awaitingDestinationLoad = false;
       showToast('⚠️ 地図取得が一部失敗しました(背景で再試行を続けます)', { duration: 4000 });
     }
+  } finally {
+    clearTimeout(timeoutId); // 成功時に残ったタイマー自体の掃除(abort()は既に完了済みのfetchには無害)
   }
   // 失敗するたびに待ち時間を延ばす(最大30秒)。連続失敗中の無駄な連打を防ぎつつ、
   // 一時的な混雑が収まれば自動的に復帰して歯抜けが埋まる。
