@@ -756,7 +756,6 @@ function plantTree(x, z) {
   poolAdd(leaf, x, gy + 2.6 * s, z, rot, s * 1.25, s * 1.3, s * 1.25); // 樹冠: 幹の上に載る球(単色)
 }
 // 道路小物のモード別ふるまい
-const PROP_WIRES   = MODE === 'real';                 // 電線は現実のみ
 const PROP_SIGNALS = MODE !== 'edo';                  // 江戸に信号はない
 const PROP_GUARD_C = MODE === 'edo' ? 0x8a6a48 : MODE === 'marchen' ? 0xffc8d8 : MODE === 'space' ? 0x2288ff : 0xf0f0f0; // 江戸=木柵
 const PROP_VEND_COLORS = MODE === 'edo' ? [0x7a5a38, 0x6a4a2a, 0x8a6a48]
@@ -764,40 +763,12 @@ const PROP_VEND_COLORS = MODE === 'edo' ? [0x7a5a38, 0x6a4a2a, 0x8a6a48]
                        : [0xff4444, 0x4488ff, 0xffffff];
 const PROP_VEND_Y = MODE === 'edo' ? 0.6 : 0.9;
 
-// 電線 — プリアロケートした単一 LineSegments に追記(1ドローコール)
-const WIRE_MAX = 6000; // 線分数上限
-const wirePos = new Float32Array(WIRE_MAX * 6);
-const wireGeo = new THREE.BufferGeometry();
-wireGeo.setAttribute('position', new THREE.BufferAttribute(wirePos, 3));
-wireGeo.setDrawRange(0, 0);
-const wireMesh = new THREE.LineSegments(wireGeo, new THREE.LineBasicMaterial({ color: 0x1a1a26 }));
-wireMesh.frustumCulled = false;
-scene.add(wireMesh);
-let wireN = 0;
-// 呼び出し元(decorateRoad)が後からY方向だけ更新できるよう、使ったインデックスを返す
-// (地形resnap用。setWireSegY参照)。
-function addWireSeg(x1, y1, z1, x2, y2, z2) {
-  if (wireN >= WIRE_MAX) return -1;
-  const idx = wireN;
-  const o = idx * 6;
-  wirePos[o] = x1; wirePos[o+1] = y1; wirePos[o+2] = z1;
-  wirePos[o+3] = x2; wirePos[o+4] = y2; wirePos[o+5] = z2;
-  wireN++;
-  wireGeo.setDrawRange(0, wireN * 2);
-  wireGeo.attributes.position.needsUpdate = true;
-  return idx;
-}
-// 電線1本のY座標だけ書き換える(X/Zはそのまま。電柱と同じ「形は変えずY方向にだけ追従」方式)。
-// 地形(NEAR)が後から更新されても、電柱・電線は生成時の高さで永久に固定されたままだった
-// (道路面・建物・駅は追従resnapがあったのに、電柱・電線だけ対象外だったため、
-// 実機検証で「電線が空中に浮いている」不具合として顕在化した)。rebuildRoadMesh参照。
-function setWireSegY(idx, y1, y2) {
-  if (idx == null || idx < 0) return;
-  const o = idx * 6;
-  wirePos[o + 1] = y1;
-  wirePos[o + 4] = y2;
-  wireGeo.attributes.position.needsUpdate = true;
-}
+// 電柱・電線(2026-07-15撤去): ただの装飾でゲームプレイに寄与しない割に、道路1本ごとに
+// 数本ずつ増える電柱メッシュ・電線セグメント・resnap処理(地形更新のたびのY座標追従)が
+// リソースを食っていたため、生成そのものをやめた(decorateRoad参照)。これに伴い、
+// 電線専用のLineSegments/バッファ/addWireSeg/setWireSegY、道路レコードのwireSpans、
+// resnapWireSpan(part1.js)もまとめて削除。電柱と共有していたpoleP/lampPインスタンスプール
+// (街灯・信号・建物の照明などで引き続き使用)は残す。
 
 function addTree(x, z, s) {
   if (MODE === 'space') return; // 宇宙: 大気が無いため植生(三角錐のクリスタル樹)は生やさない

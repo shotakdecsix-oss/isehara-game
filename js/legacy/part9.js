@@ -15,8 +15,9 @@ let _forestBX = Infinity, _forestBZ = Infinity;
 // キュー投入時(タイル到着時)には近い順に並べていたが、その後プレイヤーが動くと
 // 「近い順」が古くなる(投入時は遠かった建物が、移動後には最優先になっているのに
 // キューの奥に埋もれたまま)。低頻度(~0.5秒ごと)で未処理分だけ距離順に並べ直し、
-// 常にプレイヤーの現在地に近い建物から生成されるようにする。
+// 常にプレイヤーの現在地に近い建物・道路から生成されるようにする。
 let _buildingSortFrame = 0;
+let _roadSortFrame = 0;
 
 function resetPool(p) { p.n = 0; p.mesh.count = 0; p.mesh.instanceMatrix.needsUpdate = true; }
 
@@ -241,6 +242,14 @@ function animate() {
   // Dynamic chunk streaming — generates buildings around player as they explore
   updateChunks();
   processChunkQueue(); // フレーム分割: 1チャンク/フレーム
+  // 道路も建物と同じく、タイル到着時に一度並べた「近い順」がプレイヤーの移動で古くなる。
+  // pendingRoadMeshesは処理済み分をprocessRoadMeshQueue側でsplice(0,i)して毎回0番始まりに
+  // 保っているので、fromIdx=0でまるごと並べ直せばよい(pendingBuildingsのような
+  // インデックスカーソル管理が不要な分、建物より単純)。
+  _roadSortFrame++;
+  if (_roadSortFrame % 30 === 0) {
+    sortNewEntriesByDistanceToPlayer(pendingRoadMeshes, 0, r => ({ x: (r.x1 + r.x2) / 2, z: (r.z1 + r.z2) / 2 }));
+  }
   processRoadMeshQueue(); // 道路メッシュもフレーム分割(密集タイル到着時のフリーズ防止)
   // タイル取得分の建物もフレーム分割(20棟/フレーム)で生成。
   // 【重要】以前はここでNEAR地形の準備状況を一切見ていなかった。チャンク生成側

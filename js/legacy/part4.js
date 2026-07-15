@@ -29,37 +29,8 @@ function decorateRoad(x1, z1, x2, z2, type, w, rec) {
   }
   const minor = (type === 'road' || type === 'tertiary');
   if (minor) {
-    // 電柱(約35m間隔、道路の左側で統一)+ 電線(たるみ付き)
-    const n = Math.floor(len / 35);
-    let prevTop = null, prevPoleIdx = -1;
-    for (let i = 0; i <= n; i++) {
-      const t = (i + 0.5) / (n + 1);
-      const cx = x1 + dx * t + px * (w / 2 + 0.9);
-      const cz = z1 + dz * t + pz * (w / 2 + 0.9);
-      const gy = getGroundY(cx, cz);
-      // 江戸=木の行灯柱(短め) / その他=フルハイト
-      const poleIdx = poolAdd(poleP, cx, gy + (MODE === 'edo' ? 2.4 : 4), cz, 0, 1, MODE === 'edo' ? 0.6 : 1, 1);
-      if (POLE_ORB) poolAdd(lampP, cx, gy + (MODE === 'edo' ? 4.9 : 7.9), cz, 0, 1.1, 1.1, 1.1, POLE_ORB);
-      const top = { x: cx, y: gy + 7.6, z: cz };
-      if (PROP_WIRES && prevTop) {
-        const mx = (prevTop.x + top.x) / 2, mz = (prevTop.z + top.z) / 2;
-        const my = (prevTop.y + top.y) / 2 - 0.6;
-        const wireIdx1 = addWireSeg(prevTop.x, prevTop.y, prevTop.z, mx, my, mz);
-        const wireIdx2 = addWireSeg(mx, my, mz, top.x, top.y, top.z);
-        // 【重要】電柱・電線は生成時のgy(=その時点のgetGroundY)で永久に固定されており、
-        // 道路面・建物・駅と違って地形(NEAR)が後から更新されても追従しなかった
-        // (「電線が空中に浮いている」不具合の原因)。道路と同じrebuildRoadMesh経路で
-        // 後からY方向だけ追従させられるよう、レコードにスパン情報を記録しておく。
-        if (rec) {
-          (rec.wireSpans || (rec.wireSpans = [])).push({
-            ax: prevTop.x, az: prevTop.z, bx: cx, bz: cz,
-            poleIdxA: prevPoleIdx, poleIdxB: poleIdx, wireIdx1, wireIdx2,
-          });
-        }
-      }
-      prevTop = top;
-      prevPoleIdx = poleIdx;
-    }
+    // 電柱・電線は撤去済み(2026-07-15。ただの装飾でリソースの無駄という判断。
+    // 経緯はpart2.js冒頭のコメント参照)。
     // 自販機(江戸では樽/井戸)
     if (Math.random() < 0.13) {
       const t = 0.2 + Math.random() * 0.6;

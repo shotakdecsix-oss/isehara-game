@@ -404,21 +404,8 @@ function rebuildRoadMesh(r) {
       }
     }
   }
-  // 電柱・電線(decorateRoadでこの道路に紐付けて記録済みのスパン)も、道路面と同じ
-  // タイミングで現在の地形高さに合わせて作り直す(以前は生成時の高さで固定されたままで、
-  // 「電線が空中に浮いている」不具合の原因だった)。
-  if (r.wireSpans) for (const sp of r.wireSpans) resnapWireSpan(sp);
-}
-// 電柱2本+電線2本(たるみ付き)からなる1スパンを、現在のgetGroundYに合わせて作り直す。
-// 電柱の形は変えず、道路と同じ考え方でY座標だけ現在の地形に合わせ直す(setWireSegY参照)。
-function resnapWireSpan(sp) {
-  const gyA = getGroundY(sp.ax, sp.az), gyB = getGroundY(sp.bx, sp.bz);
-  const poleY = MODE === 'edo' ? 2.4 : 4;
-  poolSetY(poleP, sp.poleIdxA, gyA + poleY);
-  poolSetY(poleP, sp.poleIdxB, gyB + poleY);
-  const topA = gyA + 7.6, topB = gyB + 7.6, midY = (topA + topB) / 2 - 0.6;
-  setWireSegY(sp.wireIdx1, topA, midY);
-  setWireSegY(sp.wireIdx2, midY, topB);
+  // 電柱・電線は撤去済み(2026-07-15。part2.js冒頭のコメント参照)。以前はここで
+  // resnapWireSpan()を呼び、道路面と同じタイミングで電柱・電線を地形高さに追従させていた。
 }
 
 // ======= 新規投入分をプレイヤー近傍優先に並べ替える(2026-07-15) =======
