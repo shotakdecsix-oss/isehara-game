@@ -867,8 +867,20 @@ function getBuildingStyle(tags) {
     style = { color: 0xf8f8f8, roofColor: 0xdddddd, emissive: 0x111111, type: 'hospital' };
   } else if (am === 'townhall' || am === 'police' || am === 'fire_station' || name.includes('市役所') || name.includes('役場')) {
     style = { color: 0x6070a0, roofColor: 0x405080, emissive: 0x001133, type: 'government' };
-  } else if (tags.shop || bt === 'commercial' || am === 'supermarket' || am === 'convenience') {
+  } else if (tags.shop || am === 'supermarket' || am === 'convenience') {
+    // 実際の店構え(コンビニ・商店等)。街灯り演出(のれん/看板バンド等)はこの'shop'型限定。
     style = { color: 0xff8840, roofColor: 0xcc5500, emissive: 0x221100, type: 'shop' };
+  } else if (bt === 'office' || tags.office) {
+    // オフィスビル(ガラス張り寒色系)。東京・NY等の都心はマンションよりオフィスの方が
+    // 多いため、'shop'(店構え演出)とは別の落ち着いた見た目にする。
+    style = { color: 0x8090a8, roofColor: 0x505868, emissive: 0x0a1420, type: 'office' };
+  } else if (bt === 'commercial' || bt === 'retail') {
+    // 【重要】以前はbuilding=commercialを'shop'(明るいオレンジ+のれん/看板バンド等の
+    // 店構え演出)に分類していたが、commercialタグは小さな商店からオフィスタワーまで
+    // 幅広く使われており、高層のオフィスビルにコンビニ風の演出が付くのは不自然だった。
+    // 'office'と同じ落ち着いた見た目にする(退避不要にstyleを直接持つ=OFFICE_STYLEと
+    // 値は揃えているが、part3.jsのOFFICE_STYLE定数は使えないのでここでは複製する)。
+    style = { color: 0x8090a8, roofColor: 0x505868, emissive: 0x0a1420, type: 'office' };
   } else if (bt === 'apartments') {
     style = { color: 0x90a0c0, roofColor: 0x506080, emissive: 0x001122, type: 'apartment' };
   } else if (bt === 'house' || bt === 'detached' || bt === 'residential') {

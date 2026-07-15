@@ -354,6 +354,21 @@ function queryPolyGrid(grid, x0, x1, z0, z1) {
   }
   return out;
 }
+// 座標(x,z)が属するlanduse区画の種別(residential/commercial/industrial/retail等)を返す
+// (無ければnull)。generateChunk内のluTypeAtと同じ考え方だが、building=yesだけでタグ
+// (サブタイプ)が無い大きな建物を住宅(マンション)/商業(オフィス)のどちらに寄せるか
+// (part3.js classifyResidential)でも使う汎用版。
+// 【重要】landusePolygonsはこのバッチ自身の分がまだ積まれていないことがある(part6.js
+// PASS2=建物 → PASS3=landuseの順、part8.jsも建物パス→landuseパスの順のため)。
+// その場合はnullを返し、呼び出し側は既存の既定動作(マンション扱い)にフォールバックする。
+function landuseTypeAt(x, z) {
+  const near = queryPolyGrid(landuseGrid, x - 1, x + 1, z - 1, z + 1);
+  for (const p of near) {
+    if (x < p.minX || x > p.maxX || z < p.minZ || z > p.maxZ) continue;
+    if (pointInPolygon(x, z, p.pts)) return p.lu;
+  }
+  return null;
+}
 
 // 道路メッシュを、現在(呼び出し時点)の getGroundY に合わせて作り直す。
 // 以前は道路メッシュを最初に生成した瞬間の地形高さで永久に固定していたため、

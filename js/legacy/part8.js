@@ -191,7 +191,7 @@ function processTileData(data, tileCount) {
     if (cprofH8 && cprofH8.minLevels && !_landmarkType8) {
       h = Math.max(h, cprofH8.minLevels * 3);
     }
-    style = classifyResidential(style, w, d, h);
+    style = classifyResidential(style, w, d, h, cx, cz);
     let fw = w, fd = d, fh = h;
     ({ w: fw, d: fd, h: fh } = applySizeFloor(style, w, d, h)); // マンション・工場は最低サイズを底上げ
     if (MODE === 'edo') fh = applyEdoHeightCap(style, fh); // 江戸: 現代建物の実測高さそのままだと高層ビルになるため木造家屋相当に抑える
@@ -556,7 +556,7 @@ function generateChunk(chunkX, chunkZ) {
           : isCom
           ? { color:0xf09050, roofColor:0xb05020, type:'shop' }
           : { color:0x909898, roofColor:0x606868, type:'industrial' };
-        style = classifyResidential(style, bw, bd, bh); // 高さ・面積が閾値超えならマンション扱いに
+        style = classifyResidential(style, bw, bd, bh, jx, jz); // 高さ・面積が閾値超えならマンション/オフィス扱いに
         const _f1 = applySizeFloor(style, bw, bd, bh); // マンション・工場は最低サイズを底上げ
         addBuilding(jx, jz, _f1.w, _f1.d, _f1.h, style);
       }
@@ -581,7 +581,7 @@ function generateChunk(chunkX, chunkZ) {
         if (hasBuildingNearby(jx, jz, Math.max(bw, bd) / 2 + 1.5)) continue;
         const pal = HOUSE_PALETTE[(Math.random() * HOUSE_PALETTE.length) | 0];
         const bh = Math.random() < 0.12 ? 8 + Math.random() * 5 : 4 + Math.random() * 3.5;
-        const style = classifyResidential({ color: pal.w, roofColor: pal.r, type: 'house' }, bw, bd, bh);
+        const style = classifyResidential({ color: pal.w, roofColor: pal.r, type: 'house' }, bw, bd, bh, jx, jz);
         const _f2 = applySizeFloor(style, bw, bd, bh); // マンションになったら最低サイズを底上げ
         addBuilding(jx, jz, _f2.w, _f2.d, _f2.h, style);
       }

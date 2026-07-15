@@ -581,7 +581,7 @@ async function loadOSM(preFetchedData) {
       if (cprofH && cprofH.minLevels && !_landmarkType) {
         h = Math.max(h, cprofH.minLevels * 3);
       }
-      style = classifyResidential(style, w, d, h);
+      style = classifyResidential(style, w, d, h, cx, cz);
       let fw = w, fd = d, fh = h;
       ({ w: fw, d: fd, h: fh } = applySizeFloor(style, w, d, h)); // マンション・工場は最低サイズを底上げ
       if (MODE === 'edo') fh = applyEdoHeightCap(style, fh); // 江戸: 現代建物の実測高さそのままだと高層ビルになるため木造家屋相当に抑える

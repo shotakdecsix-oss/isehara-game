@@ -14,12 +14,32 @@ function resolveBuildingHeight(tags) {
 const APT_HEIGHT_M = 10;      // これ以上の高さは一戸建てタグでもマンション扱いにする
 const APT_FOOTPRINT_M2 = 200; // これ以上のフットプリント面積も同様
 const APARTMENT_STYLE = { color: 0x90a0c0, roofColor: 0x506080, emissive: 0x001122, type: 'apartment' };
-// 「高さ・階数・フットプリント面積がある閾値を超えたらタグに関わらずマンション扱いにする」ルール。
-// house/defaultタイプ(=タグが曖昧、または一戸建てタグだが実際は大きい)だけを対象にする。
-function classifyResidential(style, w, d, h) {
-  if (!style) return style;
-  if (style.type !== 'house' && style.type !== 'default') return style;
-  if (h >= APT_HEIGHT_M || w * d >= APT_FOOTPRINT_M2) return APARTMENT_STYLE;
+// オフィス・商業ビル用(ガラス張りの寒色系。part2.jsのkind選択で自動的に'office'ファサードになる)
+const OFFICE_STYLE = { color: 0x8090a8, roofColor: 0x505868, emissive: 0x0a1420, type: 'office' };
+const COMMERCIAL_INDUSTRIAL_STYLE = { color: 0x808890, roofColor: 0x505860, emissive: 0x111111, type: 'industrial' };
+// 「高さ・階数・フットプリント面積がある閾値を超えたらタグに関わらずマンション/オフィス扱いに
+// する」ルール。house/defaultタイプ(=タグが曖昧、または一戸建てタグだが実際は大きい)だけを対象にする。
+// 【重要】以前は style===null(=OSMの building=yes だけでサブタイプ無しの、実際には
+// 最も多いパターン)の建物をここで即return してしまい、footprint/高さがどれだけ大きくても
+// 判定自体が一切走らなかった。日本のマンション等は建物ポリゴンにbuilding=yesしか付いておらず
+// building:levels等の高さタグも無いことが非常に多いため、この分岐のせいで「本来マンション
+// 規模のはずの建物が、タグ欠損時のランダム1〜3階(house型ファサード)のまま」になり、
+// マンションがあるはずの場所に戸建てが敷き詰められて見える不具合の主因になっていた。
+// style===nullは type==='default' 相当として扱う(既存のhouse/default判定と同列に)。
+// 【重要・2026-07-15】東京・NYのような都心は住宅よりオフィス・商業ビルの方が多いのに、
+// 上記の格上げ先が常に「マンション」一択だった(building=yesの大きい建物は無条件で
+// 住宅顔になる)。x,zが分かれば、既に取得済みのlanduse区画(part1.js landuseTypeAt)を
+// 見て、商業・工業区画ならオフィス/商業ビル寄りの見た目にする。landuse情報がまだ無い
+// (このバッチ自身のlanduseパスがまだ来ていない等)場合は、従来通りマンション扱いに
+// フォールバックする(挙動を壊さない既定値)。
+function classifyResidential(style, w, d, h, x, z) {
+  if (style && style.type !== 'house' && style.type !== 'default') return style;
+  if (h >= APT_HEIGHT_M || w * d >= APT_FOOTPRINT_M2) {
+    const lu = (x != null && z != null) ? landuseTypeAt(x, z) : null;
+    if (lu === 'industrial') return COMMERCIAL_INDUSTRIAL_STYLE;
+    if (lu === 'commercial' || lu === 'retail' || lu === 'mixed_use') return OFFICE_STYLE;
+    return APARTMENT_STYLE;
+  }
   return style;
 }
 
@@ -37,7 +57,7 @@ function applyLandmarkMinHeight(style, h) {
 // 明治(実測データに基づき低層の集落家屋へ全面差し替え済み)より江戸の方が高層建築だらけに
 // 見えてしまう(本来は逆で、江戸期の方が古く木造2階建て程度が大半のはず)。
 // 神社仏閣・城郭など一部の例外を除き、天井高さを木造家屋相当に抑える。
-const EDO_MAX_H = { shrine: 16, temple: 16, church: 16, school: 8, hospital: 8, government: 9, apartment: 8, industrial: 8, shop: 8, house: 8, default: 8 };
+const EDO_MAX_H = { shrine: 16, temple: 16, church: 16, school: 8, hospital: 8, government: 9, apartment: 8, industrial: 8, shop: 8, office: 8, house: 8, default: 8 };
 function applyEdoHeightCap(style, h) {
   const cap = EDO_MAX_H[(style && style.type) || 'default'];
   return Math.min(h, cap != null ? cap : EDO_MAX_H.default);
@@ -56,6 +76,7 @@ function shouldSkipEdoBuilding(style) {
 const SIZE_FLOOR = {
   apartment:  { w: 15, d: 12, h: 12 },
   industrial: { w: 20, d: 16, h: 8  },
+  office:     { w: 15, d: 12, h: 12 },
 };
 function applySizeFloor(style, w, d, h) {
   if (!style) return { w, d, h };
