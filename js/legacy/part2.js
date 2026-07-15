@@ -597,9 +597,14 @@ function registerStationPoints(elements) {
     }
   }
 }
+// 【2026-07-15】ユーザー判断で一時無効化。都会な地域は実際のOSM建物データ(高さ/階数タグ)が
+// ちゃんと揃っているはずなので、駅密集による強制高層化は不要という判断。ロジック自体は
+// そのまま残し、このフラグをtrueに戻すだけで再度有効化できる。
+const STATION_HUB_ENABLED = false;
 // 座標(x,z)の半径STATION_HUB_RADIUS_M以内に、登録済み駅ノードがSTATION_HUB_MIN_COUNT個以上あるか。
 // (駅の総数はセッション全体でもせいぜい数百件程度なので、建物ごとの線形走査で十分軽い)
 function isStationHubNear(x, z) {
+  if (!STATION_HUB_ENABLED) return false;
   if (globalStationPoints.size < STATION_HUB_MIN_COUNT) return false;
   const r2 = STATION_HUB_RADIUS_M * STATION_HUB_RADIUS_M;
   let n = 0;
