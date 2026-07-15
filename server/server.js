@@ -95,19 +95,39 @@ const INJECT = `<script>
   // 症状の原因)。上流はいずれもCORS対応なのでブラウザから直接叩け、その場合は各プレイヤー
   // 自身のIPでレート制限枠を使うため、共有IPよりむしろ通りやすい。
   // プロキシが健在な間は従来どおりプロキシ+ディスクキャッシュを使う(ローカルで有効)。
+  //
+  // 【重要・2026-07-15追記】上記の直接アクセスには元々ペース配分が無く、proxyDownも一度
+  // 立つとタブの生存中ずっと直接モードに固定されていた。実機で「しばらく動き回った後に
+  // 道路・線路の拡張が止まる」を診断したところ、direct()経由でoverpass-api.deに429
+  // (Too Many Requests)→さらに悪化してnet::ERR_CONNECTION_TIMED_OUT(一時的な接続拒否)
+  // が連発しているのを確認。サーバ側は1.1秒間隔厳守だが、直接モードにはその制約が無いため
+  // プレイヤーが速く動き回ってタイル要求が増えると連投になり、Overpass公開インスタンス側の
+  // レート制限に自分から突っ込んでいた。かつ一度そうなると詰まったまま自己回復しない。
+  // → (1) 直接モードにも同じ1.1秒間隔のペース配分を追加、(2) proxyDownを恒久フラグではなく
+  // タイムスタンプにし、一定時間後にプロキシへの復帰を自動で試みるようにする。
   const proxyDown = {};
+  const lastDirectAt = {};
+  const DIRECT_MIN_INTERVAL_MS = 1100; // サーバ側のMIN_INTERVAL_MSと揃える
+  const PROXY_RETRY_MS = 120000; // 2分ごとにプロキシへの復帰を試す(一時的な不調で永久固定されないように)
   const origFetch = window.fetch.bind(window);
   window.fetch = function(input, init) {
     let url = (typeof input === 'string') ? input : (input && input.url) || '';
     for (const [prefix, local] of MAP) {
       if (url.startsWith(prefix)) {
-        const direct = () => origFetch(url, init);
-        if (proxyDown[prefix]) return direct();
+        const direct = async () => {
+          const wait = (lastDirectAt[prefix] || 0) + DIRECT_MIN_INTERVAL_MS - Date.now();
+          if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+          lastDirectAt[prefix] = Date.now();
+          return origFetch(url, init);
+        };
+        const downSince = proxyDown[prefix];
+        if (downSince && (Date.now() - downSince) < PROXY_RETRY_MS) return direct();
         return origFetch(local + url.slice(prefix.length), init).then(res => {
           lastApiWasCacheHit = res.headers.get('X-Cache') === 'HIT';
-          if (res.status >= 500) { proxyDown[prefix] = true; return direct(); }
+          if (res.status >= 500) { proxyDown[prefix] = Date.now(); return direct(); }
+          proxyDown[prefix] = null; // プロキシ復帰確認
           return res;
-        }, () => { proxyDown[prefix] = true; return direct(); });
+        }, () => { proxyDown[prefix] = Date.now(); return direct(); });
       }
     }
     return origFetch(input, init);
