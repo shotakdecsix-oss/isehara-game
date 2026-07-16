@@ -776,8 +776,8 @@ function updateAltitudeLOD() {
   if (!on && !_altLodOn) return; // 地上同士の遷移は何もしない
   const px = player.position.x, pz = player.position.z;
   for (const rec of buildingRecords) {
-    const vis = !on || rec.h > 25 ||
-      ((rec.x - px) * (rec.x - px) + (rec.z - pz) * (rec.z - pz)) < 500 * 500;
+    const vis = !on || rec.h > 40 ||
+      ((rec.x - px) * (rec.x - px) + (rec.z - pz) * (rec.z - pz)) < 300 * 300;
     if (rec._lodVis === vis) continue;
     rec._lodVis = vis;
     for (const p of rec.parts) { if (p) p.visible = vis; }
