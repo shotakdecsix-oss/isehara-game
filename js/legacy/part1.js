@@ -760,6 +760,31 @@ function unloadFarBuildings() {
   rebuildBuildingGrid();
 }
 
+// ======= 【2026-07-16】高度LOD =======
+// 地上では視錐台カリングで大半の建物が描画されないが、上空へ浮上すると生成距離圏の
+// 全建物(密集地で数万メッシュ)が一斉に視界へ入り、ドローコール爆発でクラッシュする
+// (実機: 東京駅・標準設定で静止→フル密度生成完了→浮上で落ちる。軽量では耐える)。
+// 一定高度を超えたら「近距離500m圏か、高さ25m超(スカイラインを構成する建物)」だけを
+// 表示し、遠くの低層は非表示にする。降下すれば全表示に戻る。
+let _altLodOn = false;
+let _altLodFrame = 0;
+function updateAltitudeLOD() {
+  _altLodFrame++;
+  if (_altLodFrame % 45 !== 0) return; // ~0.75秒ごと
+  const alt = player.position.y - getGroundY(player.position.x, player.position.z);
+  const on = alt > 120;
+  if (!on && !_altLodOn) return; // 地上同士の遷移は何もしない
+  const px = player.position.x, pz = player.position.z;
+  for (const rec of buildingRecords) {
+    const vis = !on || rec.h > 25 ||
+      ((rec.x - px) * (rec.x - px) + (rec.z - pz) * (rec.z - pz)) < 500 * 500;
+    if (rec._lodVis === vis) continue;
+    rec._lodVis = vis;
+    for (const p of rec.parts) { if (p) p.visible = vis; }
+  }
+  _altLodOn = on;
+}
+
 // dormantBuildings(遠すぎて未生成、または遠方で解放済みの実建物)を低頻度でスキャンし、
 // プレイヤーがBUILDING_GEN_DIST以内に近づいたものだけpendingBuildingsへ戻して
 // 通常の生成キューに合流させる。unloadFarBuildingsと同じ頻度(~1.5秒ごと)で十分
