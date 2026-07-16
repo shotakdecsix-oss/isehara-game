@@ -80,22 +80,29 @@ function facadeMat(kind, color, variant) {
   const hit = facadeCache.get(key);
   if (hit) return hit;
   const S = 128;
-  const cv = document.createElement('canvas'); cv.width = cv.height = S;
+  // 【2026-07-16】ビル系(office/apt、現実モード)はテクスチャを縦4フロア分にし、フロアごとに
+  // 窓の点灯を独立に抽選する。従来は1フロア分のタイルを全フロアへUV繰り返ししていたため、
+  // タイル内の窓の点灯状態が全フロアに複製され「全点灯 or 全消灯」のビルにしか見えなかった。
+  // (part3.js setBoxFacadeUVs側で繰り返し数をfloors/4に合わせる)
+  const vFloors = (kind === 'office' || kind === 'apt') &&
+    MODE !== 'space' && MODE !== 'edo' && !IS_MEIJI && MODE !== 'marchen' ? 4 : 1;
+  const H = S * vFloors;
+  const cv = document.createElement('canvas'); cv.width = S; cv.height = H;
   const g = cv.getContext('2d');
-  const ec = document.createElement('canvas'); ec.width = ec.height = S;
+  const ec = document.createElement('canvas'); ec.width = S; ec.height = H;
   const e = ec.getContext('2d');
-  e.fillStyle = '#000'; e.fillRect(0, 0, S, S);
+  e.fillStyle = '#000'; e.fillRect(0, 0, S, H);
   // 決定的乱数 — 同じキーは常に同じ絵(チャンク再生成でも見た目が揺れない)
   let sd = 2166136261 ^ (variant * 977);
   for (let i = 0; i < key.length; i++) sd = (sd ^ key.charCodeAt(i)) * 16777619 | 0;
   const rnd = () => ((sd = (sd * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
   const wc = _hex6(MODE_CONF.windowC);
 
-  g.fillStyle = _hex6(color); g.fillRect(0, 0, S, S);
+  g.fillStyle = _hex6(color); g.fillRect(0, 0, S, H);
   // 壁のむら・汚れ
-  for (let i = 0; i < 26; i++) {
+  for (let i = 0; i < 26 * vFloors; i++) {
     g.fillStyle = rnd() < 0.5 ? 'rgba(0,0,0,0.05)' : 'rgba(255,255,255,0.05)';
-    g.fillRect((rnd() * S) | 0, (14 + rnd() * (S - 18)) | 0, (2 + rnd() * 5) | 0, (2 + rnd() * 4) | 0);
+    g.fillRect((rnd() * S) | 0, (14 + rnd() * (H - 18)) | 0, (2 + rnd() * 5) | 0, (2 + rnd() * 4) | 0);
   }
 
   // 窓1枚(枠+ガラス+中桟/格子+窓下の落ち影。lit なら emissive にも描く)
@@ -190,16 +197,21 @@ function facadeMat(kind, color, variant) {
     g.fillStyle = '#d8c890'; g.fillRect(100, 96, 2, 5);
   } else if (kind === 'apt') {
     // ===== 現実: 集合住宅(スラブ+窓+ベランダ手すり壁) =====
-    g.fillStyle = 'rgba(0,0,0,0.18)'; g.fillRect(0, 0, S, 4);
-    const gr = g.createLinearGradient(0, 4, 0, 18);
-    gr.addColorStop(0, 'rgba(0,0,0,0.14)'); gr.addColorStop(1, 'rgba(0,0,0,0)');
-    g.fillStyle = gr; g.fillRect(0, 4, S, 14);
-    win(24, 30, 80, 44, rnd() < 0.45);
-    g.fillStyle = 'rgba(15,18,24,0.35)'; g.fillRect(10, 80, 108, 6); // ベランダ奥の影
-    g.fillStyle = _shadeCss(color, 0.82); g.fillRect(8, 86, 112, 30); // 手すり壁
-    g.fillStyle = _shadeCss(color, 0.66); g.fillRect(8, 86, 112, 3);  // 笠木
-    g.fillStyle = 'rgba(0,0,0,0.2)';
-    for (let vx = 14; vx < 118; vx += 13) g.fillRect(vx, 89, 2, 26);
+    // vFloorsフロア分を縦に並べ、フロアごとに窓の点灯を独立抽選(全点灯/全消灯ビルの解消)
+    for (let vf = 0; vf < vFloors; vf++) {
+      g.save(); e.save(); g.translate(0, vf * S); e.translate(0, vf * S);
+      g.fillStyle = 'rgba(0,0,0,0.18)'; g.fillRect(0, 0, S, 4);
+      const gr = g.createLinearGradient(0, 4, 0, 18);
+      gr.addColorStop(0, 'rgba(0,0,0,0.14)'); gr.addColorStop(1, 'rgba(0,0,0,0)');
+      g.fillStyle = gr; g.fillRect(0, 4, S, 14);
+      win(24, 30, 80, 44, rnd() < 0.45);
+      g.fillStyle = 'rgba(15,18,24,0.35)'; g.fillRect(10, 80, 108, 6); // ベランダ奥の影
+      g.fillStyle = _shadeCss(color, 0.82); g.fillRect(8, 86, 112, 30); // 手すり壁
+      g.fillStyle = _shadeCss(color, 0.66); g.fillRect(8, 86, 112, 3);  // 笠木
+      g.fillStyle = 'rgba(0,0,0,0.2)';
+      for (let vx = 14; vx < 118; vx += 13) g.fillRect(vx, 89, 2, 26);
+      g.restore(); e.restore();
+    }
   } else if (kind === 'ind') {
     // ===== 現実: 工場・倉庫(波板+ハイサイド窓+シャッター) =====
     g.fillStyle = 'rgba(0,0,0,0.06)';
@@ -213,14 +225,19 @@ function facadeMat(kind, color, variant) {
     }
   } else {
     // ===== 現実: オフィスビル(スラブ+目地+窓2列+スパンドレル) =====
-    g.fillStyle = 'rgba(0,0,0,0.2)'; g.fillRect(0, 0, S, 4);
-    const gr = g.createLinearGradient(0, 4, 0, 16);
-    gr.addColorStop(0, 'rgba(0,0,0,0.12)'); gr.addColorStop(1, 'rgba(0,0,0,0)');
-    g.fillStyle = gr; g.fillRect(0, 4, S, 12);
-    g.fillStyle = 'rgba(0,0,0,0.15)'; g.fillRect(0, 13, 2, S - 13); g.fillRect(S - 2, 13, 2, S - 13); // 目地
-    win(16, 34, 42, 56, rnd() < 0.45);
-    win(70, 34, 42, 56, rnd() < 0.45);
-    g.fillStyle = _shadeCss(color, 0.86); g.fillRect(10, 102, 108, 16); // スパンドレル
+    // vFloorsフロア分を縦に並べ、フロアごとに窓の点灯を独立抽選(全点灯/全消灯ビルの解消)
+    for (let vf = 0; vf < vFloors; vf++) {
+      g.save(); e.save(); g.translate(0, vf * S); e.translate(0, vf * S);
+      g.fillStyle = 'rgba(0,0,0,0.2)'; g.fillRect(0, 0, S, 4);
+      const gr = g.createLinearGradient(0, 4, 0, 16);
+      gr.addColorStop(0, 'rgba(0,0,0,0.12)'); gr.addColorStop(1, 'rgba(0,0,0,0)');
+      g.fillStyle = gr; g.fillRect(0, 4, S, 12);
+      g.fillStyle = 'rgba(0,0,0,0.15)'; g.fillRect(0, 13, 2, S - 13); g.fillRect(S - 2, 13, 2, S - 13); // 目地
+      win(16, 34, 42, 56, rnd() < 0.45);
+      win(70, 34, 42, 56, rnd() < 0.45);
+      g.fillStyle = _shadeCss(color, 0.86); g.fillRect(10, 102, 108, 16); // スパンドレル
+      g.restore(); e.restore();
+    }
   }
 
   const tex = new THREE.CanvasTexture(cv);

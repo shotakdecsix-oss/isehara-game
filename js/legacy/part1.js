@@ -542,7 +542,13 @@ function processRoadMeshQueue() {
 // 破棄・復元する(復元は上のrebuildRoadMeshが、プレイヤーが近づいてチャンクが再生成される
 // タイミングで自動的に行う)。高架(motorway)は橋脚がInstancedMeshで個別解放できないため
 // 対象外とする(高速道路は本数が少なく、影響は小さい)。
-const ROAD_UNLOAD_DIST = 2500;
+// 【2026-07-16】モバイル判定。スマホはタブあたりのメモリ上限が厳しく(目安1GB前後で
+// ブラウザ/OSに強制終了される)、PCと同じ生成距離だと描画済み建物・道路のメッシュが
+// 上限を超えて「移動していると落ちる」ため、以降の保持距離系の定数を縮小する。
+// (これより後ろのBUILDING_*_DIST・CHUNK_RADIUSもIS_MOBILEを参照する)
+const IS_MOBILE = /Android|iPhone|iPad|Mobile/i.test(navigator.userAgent) ||
+  (navigator.maxTouchPoints > 1 && Math.min(screen.width, screen.height) < 900);
+const ROAD_UNLOAD_DIST = IS_MOBILE ? 1800 : 2500; // モバイルは道路メッシュの保持範囲も縮小(メモリ対策)
 let _roadUnloadFrame = 0;
 function unloadFarRoads() {
   _roadUnloadFrame++;
@@ -699,13 +705,13 @@ function rebuildBuildingsInBounds(x0, x1, z0, z1) {
 // UNLOAD側は当初1000mだったが、GEN(800m)との差が小さく、少し斜めに歩いただけでも
 // 頻繁に解放→再生成を繰り返しがちだったため1500mに広げ、ヒステリシス帯を厚くした。
 // 【2026-07-16】種類別の距離に分離(ユーザー要望):
-// ・実OSM建物(real=マップデータ由来) = 3000mで生成 / 3800mで消去
+// ・実OSM建物(real=マップデータ由来) = 3000mで生成 / 3800mで消去(モバイルは1600/2200)
 // ・手続き生成建物(real=false)はチャンクシステム側(CHUNK_RADIUS)が約1000mを管理
 // ヒステリシス帯(GEN<UNLOAD)は従来同様、境界往復でのチラつき防止。
-const BUILDING_GEN_DIST_REAL = 3000;
-const BUILDING_UNLOAD_DIST_REAL = 3800;
+const BUILDING_GEN_DIST_REAL = IS_MOBILE ? 1600 : 3000;
+const BUILDING_UNLOAD_DIST_REAL = IS_MOBILE ? 2200 : 3800;
 const BUILDING_GEN_DIST_PROC = 1000;
-const BUILDING_UNLOAD_DIST_PROC = 1800;
+const BUILDING_UNLOAD_DIST_PROC = IS_MOBILE ? 1400 : 1800;
 let _buildingUnloadFrame = 0;
 function unloadFarBuildings() {
   _buildingUnloadFrame++;
@@ -773,7 +779,8 @@ const CHUNK_SIZE = 120;  // meters per chunk side
 // 【2026-07-16】ユーザー要望「手続き生成建物=約1000m」に合わせ 3→8(8×120=960m)。
 // チャンク数は49→289に増えるが生成はフレーム分割キューなので徐々に埋まる。
 // 重すぎる場合は6(720m)あたりに戻す候補。
-const CHUNK_RADIUS = USES_MEIJI_LANDUSE ? 4 : 8;
+// モバイルは手続き生成も5(600m)に抑える(メモリ対策。PCは8=960m)
+const CHUNK_RADIUS = USES_MEIJI_LANDUSE ? 4 : (IS_MOBILE ? 5 : 8);
 
 function pointInPolygon(px, pz, pts) {
   let inside = false;
