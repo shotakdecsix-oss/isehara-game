@@ -117,20 +117,52 @@ const INJECT = `<script>
   // 事象と一致)。プレフィックスごとにPromiseチェーンで直列化し、「待つ→時刻更新」を
   // 呼び出しごとに確実に1つずつ順番に処理させる(server.js側のscheduleUpstreamと同じ考え方)。
   const directChains = {};
+  // 【重要・2026-07-16】直接モードはoverpass-api.de単一ホスト固定だったため、密集地で
+  // タイルのバックログが積むと1.1秒間隔でも公開インスタンスのレート制限に到達し、
+  // 429/504が連発→part8.js側の失敗カウントが4に達して「諦め=永久空き地」になっていた
+  // (実機コンソールで429/504の連鎖を確認)。直接モードもミラー輪番にし、429/5xx/
+  // ネットワークエラーを返したミラーは一定時間除外する。ペース配分・直列化チェーンも
+  // ミラー(ホスト)ごとに独立させ、健全なミラーが複数ある間は実効スループットも上がる。
+  const OVERPASS_PREFIX = 'https://overpass-api.de/api/interpreter';
+  const OVERPASS_DIRECT_MIRRORS = [
+    'https://overpass-api.de/api/interpreter',
+    'https://overpass.kumi.systems/api/interpreter',
+    'https://overpass.private.coffee/api/interpreter',
+  ];
+  const mirrorBackoffUntil = {}; // ミラーURL -> このtimestampまで使わない
+  const paceThrough = async (chainKey) => { // chainKeyごとに1.1秒間隔を直列で保証
+    const prevChain = directChains[chainKey] || Promise.resolve();
+    const myTurn = prevChain.then(async () => {
+      const wait = (lastDirectAt[chainKey] || 0) + DIRECT_MIN_INTERVAL_MS - Date.now();
+      if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+      lastDirectAt[chainKey] = Date.now();
+    });
+    directChains[chainKey] = myTurn.catch(() => {}); // 1件失敗してもチェーンは継続
+    await myTurn;
+  };
   const origFetch = window.fetch.bind(window);
   window.fetch = function(input, init) {
     let url = (typeof input === 'string') ? input : (input && input.url) || '';
     for (const [prefix, local] of MAP) {
       if (url.startsWith(prefix)) {
         const direct = async () => {
-          const prevChain = directChains[prefix] || Promise.resolve();
-          const myTurn = prevChain.then(async () => {
-            const wait = (lastDirectAt[prefix] || 0) + DIRECT_MIN_INTERVAL_MS - Date.now();
-            if (wait > 0) await new Promise((r) => setTimeout(r, wait));
-            lastDirectAt[prefix] = Date.now();
-          });
-          directChains[prefix] = myTurn.catch(() => {}); // 1件失敗してもチェーンは継続
-          await myTurn;
+          if (prefix === OVERPASS_PREFIX) {
+            const now = Date.now();
+            const mirror = OVERPASS_DIRECT_MIRRORS.find((m) => (mirrorBackoffUntil[m] || 0) < now)
+              || OVERPASS_DIRECT_MIRRORS[0]; // 全滅時は本家に戻す(part8側の再試行間隔に任せる)
+            await paceThrough(mirror);
+            try {
+              const res = await origFetch(mirror + url.slice(prefix.length), init);
+              if (res.status === 429) mirrorBackoffUntil[mirror] = Date.now() + 60000;
+              else if (res.status >= 500) mirrorBackoffUntil[mirror] = Date.now() + 30000;
+              return res;
+            } catch (e) {
+              // CORS非対応ミラーや一時的な接続拒否もここに来る。除外して呼び出し側に再試行させる。
+              mirrorBackoffUntil[mirror] = Date.now() + 30000;
+              throw e;
+            }
+          }
+          await paceThrough(prefix);
           return origFetch(url, init);
         };
         const downSince = proxyDown[prefix];
