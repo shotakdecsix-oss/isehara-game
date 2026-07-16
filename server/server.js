@@ -130,6 +130,9 @@ const INJECT = `<script>
     'https://overpass.private.coffee/api/interpreter',
   ];
   const mirrorBackoffUntil = {}; // ミラーURL -> このtimestampまで使わない
+  // 「先頭の健全なミラー」方式だと本家が429を返すまで永遠に本家だけが選ばれ、負荷分散に
+  // ならない(実機ログ: 修正後もoverpass-api.deだけに投げ続けて429/504)。輪番で回す。
+  let mirrorIdx = 0;
   const paceThrough = async (chainKey) => { // chainKeyごとに1.1秒間隔を直列で保証
     const prevChain = directChains[chainKey] || Promise.resolve();
     const myTurn = prevChain.then(async () => {
@@ -148,8 +151,16 @@ const INJECT = `<script>
         const direct = async () => {
           if (prefix === OVERPASS_PREFIX) {
             const now = Date.now();
-            const mirror = OVERPASS_DIRECT_MIRRORS.find((m) => (mirrorBackoffUntil[m] || 0) < now)
-              || OVERPASS_DIRECT_MIRRORS[0]; // 全滅時は本家に戻す(part8側の再試行間隔に任せる)
+            let mirror = null;
+            for (let i = 0; i < OVERPASS_DIRECT_MIRRORS.length; i++) {
+              const cand = OVERPASS_DIRECT_MIRRORS[(mirrorIdx + i) % OVERPASS_DIRECT_MIRRORS.length];
+              if ((mirrorBackoffUntil[cand] || 0) < now) {
+                mirror = cand;
+                mirrorIdx = (mirrorIdx + i + 1) % OVERPASS_DIRECT_MIRRORS.length; // 次回は次のミラーから
+                break;
+              }
+            }
+            if (!mirror) mirror = OVERPASS_DIRECT_MIRRORS[0]; // 全滅時は本家(part8側の再試行間隔に任せる)
             await paceThrough(mirror);
             try {
               const res = await origFetch(mirror + url.slice(prefix.length), init);
