@@ -763,13 +763,38 @@ function unloadFarBuildings() {
   // 上限に余裕がある通常時は従来のヒステリシスでチラつきを防ぐ。
   const _nearCap = buildingRecords.length >= PERF.bMax * 0.95;
   const _realLim = _nearCap ? BUILDING_GEN_DIST_REAL : BUILDING_UNLOAD_DIST_REAL;
-  const d2Real = _realLim * _realLim;
+  let d2Real = _realLim * _realLim;
+  // 【2026-07-16】上限到達中の「空洞化」対策。消去距離を生成距離まで詰めるだけでは、
+  // 古い方向の1500〜2200m帯の建物が枠を占有し続け、足元の新着建物が枠待ちになって
+  // 「遠くは建っているのに手前が空洞」になる瞬間があった(実機報告)。上限到達中は
+  // 距離ヒストグラムで「近い順にbMaxの85%が収まる半径」を求め、それより外を解放する。
+  // = どんな密集地でも常に「プレイヤーに近い建物が最優先で描画枠を得る」ことを保証する。
+  if (_nearCap) {
+    const BIN = 100, NBIN = 40; // 100m刻み×4km
+    const hist = new Array(NBIN).fill(0);
+    for (const rec of buildingRecords) {
+      if (!rec.real) continue;
+      const dx = rec.x - px, dz = rec.z - pz;
+      // 高層(40m超)は距離を1.6で割って「近い扱い」にし、選別で生き残りやすくする
+      // (上限到達で保持半径が縮んでも、遠景のスカイラインが丸ごと消えないように)
+      const dist = Math.sqrt(dx * dx + dz * dz) / (rec.h > 40 ? 1.6 : 1);
+      const bi = Math.min(NBIN - 1, (dist / BIN) | 0);
+      hist[bi]++;
+    }
+    let acc = 0, cutoff = NBIN;
+    const target = PERF.bMax * 0.85;
+    for (let i = 0; i < NBIN; i++) { acc += hist[i]; if (acc >= target) { cutoff = i + 1; break; } }
+    const cutR = cutoff * BIN;
+    if (cutR * cutR < d2Real) d2Real = cutR * cutR;
+  }
   const d2Proc = BUILDING_UNLOAD_DIST_PROC * BUILDING_UNLOAD_DIST_PROC;
   const removeIds = new Set();
   for (let i = buildingRecords.length - 1; i >= 0; i--) {
     const rec = buildingRecords[i];
     const dx = rec.x - px, dz = rec.z - pz;
-    if (dx * dx + dz * dz <= (rec.real ? d2Real : d2Proc)) continue; // まだ範囲内
+    let dd = dx * dx + dz * dz;
+    if (rec.real && rec.h > 40) dd /= 2.56; // 高層は1.6倍遠くまで保持(ヒストグラムの換算と一致させる)
+    if (dd <= (rec.real ? d2Real : d2Proc)) continue; // まだ範囲内
     for (const p of rec.parts) {
       if (!p) continue;
       scene.remove(p);
