@@ -34,6 +34,7 @@ const osmTileQueue = [];
 // per-hostペース配分(1.1s)が守られるので上流には安全。429が増えるようなら2に戻す。
 const OSM_TILE_CONCURRENCY = 3;
 let osmTileActiveCount = 0;
+let _osmMoveUx = 0, _osmMoveUz = 0; // プレイヤーの進行方向(単位ベクトル)。取得順の前方優先に使う
 const osmTileFailCount = new Map(); // タイルごとの失敗回数(3回まで再試行)
 // 【重要】標高データ+初期OSMのロード完了までタイル取得を止めるゲート。
 // 以前は起動直後からタイル取得が走り、標高ロード(約8秒)より先に完了した
@@ -336,9 +337,15 @@ async function fetchOSMTileBatch() {
   // プレイヤーに近いタイルを優先(以前はキュー投入順で、進行方向の
   // タイルが後回しになり目の前で道路が途切れたまま待たされていた)
   const ptx = player.position.x / OSM_TILE_M, ptz = player.position.z / OSM_TILE_M;
-  osmTileQueue.sort((a, b) =>
-    (Math.abs(a.tx + 0.5 - ptx) + Math.abs(a.tz + 0.5 - ptz)) -
-    (Math.abs(b.tx + 0.5 - ptx) + Math.abs(b.tz + 0.5 - ptz)));
+  // 【2026-07-16】距離のみのソートだと真後ろと真正面のタイルが同順位になり、移動中に
+  // 前方タイルが後回しになることがあった。進行方向(checkOSMTilesで更新される
+  // _osmMoveUx/Uz)への射影ぶんスコアを引いて、同距離なら前方を必ず先に取得する。
+  // 係数0.8: 前方1タイル先 ≒ 横0.8タイルぶん優先(後方タイルは射影が負なので不利になる)。
+  const _tileScore = (t) => {
+    const dx = t.tx + 0.5 - ptx, dz = t.tz + 0.5 - ptz;
+    return Math.abs(dx) + Math.abs(dz) - (dx * _osmMoveUx + dz * _osmMoveUz) * 0.8;
+  };
+  osmTileQueue.sort((a, b) => _tileScore(a) - _tileScore(b));
   // ジャンプ直後(現在地のタイルすら未確定)は、まず1枚だけの小さいクエリで最速で足元の
   // 道路・建物を出す。6枚まとめの大クエリはOverpass側の実行に20〜40秒かかるため、
   // ジャンプ後「道路が出るまで1〜2分」の主因だった(同時実行枠は1IPあたり2つしかない)。
@@ -522,9 +529,16 @@ function checkOSMTiles() {
   const flen = Math.hypot(fdx, fdz);
   if (flen > 1) {
     const ux = fdx / flen, uz = fdz / flen, perpx = -uz, perpz = ux;
-    for (let k = 4; k <= 6; k++)
+    // 進行方向の単位ベクトルを保存し、fetchOSMTileBatchの取得順ソートで前方を優先させる
+    _osmMoveUx = ux; _osmMoveUz = uz;
+    // 【2026-07-16】k=4..6 → 3..6。基本先読みを7×7(半径3)→5×5(半径2)へ縮めた際、
+    // ここが4始まりのままだと「3タイル先」のリングだけ誰も積まない穴になり、
+    // 移動し続けると密集地のフェッチ遅延に追いついて道路の未生成端にぶつかっていた。
+    for (let k = 3; k <= 6; k++)
       for (let s = -1; s <= 1; s++)
         queueTile(px + (ux * k + perpx * s) * OSM_TILE_M, pz + (uz * k + perpz * s) * OSM_TILE_M);
+  } else {
+    _osmMoveUx = 0; _osmMoveUz = 0; // 停止中は方向バイアス無し(純粋な距離順)
   }
   if (osmTileQueue.length > 0) processOSMTileQueue(); // 空きワーカー枠がある分だけ内部で処理される
 }
