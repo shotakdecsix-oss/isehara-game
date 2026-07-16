@@ -643,11 +643,17 @@ function processWaterRelation(el) {
 }
 
 // waterway の実幅: width タグ優先、なければ種別から推定
+// 【2026-07-16】川幅の忠実化: (1)上限60m→300mに緩和(相模川・多摩川クラスの
+// width=100〜300mが一律60mに切られて細く見えていた。300m超は異常値とみなし切る)、
+// (2)est_width(概算幅)タグもフォールバックに採用、(3)タグ無しriverの推定を12→16mに
+// (日本のOSMで大河川は実形状ポリゴンを持つことが多く、線のみのriverは中規模河川が主のため
+// 控えめに引き上げ)。実形状ポリゴン(riverbank/natural=water)がある区間はそちらが
+// 常に優先して描かれる(リボンはyOffが低く、ポリゴンの下に隠れる)ので影響しない。
 function waterwayWidth(tags) {
-  const wtag = parseFloat(tags.width || tags['width:river']); // "5 m" 等も parseFloat で拾える
-  if (wtag > 0) return Math.min(60, Math.max(1.5, wtag));
+  const wtag = parseFloat(tags.width || tags['width:river'] || tags.est_width); // "5 m" 等も parseFloat で拾える
+  if (wtag > 0) return Math.min(300, Math.max(1.5, wtag));
   switch (tags.waterway) {
-    case 'river':  return 12;
+    case 'river':  return 16;
     case 'canal':  return 5;
     case 'stream': return 2.5;
     default:       return 3;
