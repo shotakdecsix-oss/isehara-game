@@ -670,24 +670,15 @@ const playerRadius = 0.25; // small radius so player fits on narrow roads
 // 【2026-07-16】回転建物対応の水平判定。box.rotが無ければ従来どおりAABB、あれば
 // プレイヤー座標を建物ローカル系へ逆回転して軸平行判定(円vs矩形近似)。
 // これで斜め向きのビルも見た目どおりの壁位置で当たる。
-function collBoxHitsXZ(box, x, z, r, ignorePass) {
-  if (box.cx === undefined) { // 回転もコリドーも無い従来ボックス
+function collBoxHitsXZ(box, x, z, r) {
+  if (box.cx === undefined) { // 回転の無い従来ボックス
     return x + r > box.min.x && x - r < box.max.x && z + r > box.min.z && z - r < box.max.z;
   }
   const dx = x - box.cx, dz = z - box.cz;
   const c = Math.cos(box.rot), s = Math.sin(box.rot);
   const lx = dx * c - dz * s; // rotation.y=θの逆変換
   const lz = dx * s + dz * c;
-  if (!(Math.abs(lx) < box.hw + r && Math.abs(lz) < box.hd + r)) return false;
-  // 線路またぎ建物(駅ビル等)の透過コリドー: 帯の内側は「当たらない」扱いにして
-  // 線路上の移動を通す(ignorePass=trueの屋根判定では帯を無視して全面有効)
-  if (!ignorePass && box.pass) {
-    for (const p of box.pass) {
-      const q = p.axis === 'v' ? lz : lx;
-      if (q > p.a && q < p.b) return false;
-    }
-  }
-  return true;
+  return Math.abs(lx) < box.hw + r && Math.abs(lz) < box.hd + r;
 }
 
 function wouldCollide(nx, nz, yBase) {
@@ -712,7 +703,7 @@ function floorHeightAt(x, z, fromY) {
   let fy = getGroundY(x, z) + 0.35;
   const arr = collGrid.get(Math.floor(x / COLL_CELL) + ',' + Math.floor(z / COLL_CELL));
   if (arr) for (const b of arr) {
-    if (collBoxHitsXZ(b, x, z, 0, true)) { // 回転建物も見た目どおりの屋根範囲で立てる(コリドー無視=屋根は全面)
+    if (collBoxHitsXZ(b, x, z, 0)) { // 回転建物も見た目どおりの屋根範囲で立てる
       const top = b.max.y + 0.35;
       // 現在高さ+0.5以下の屋根だけを床候補に(下から突き上げない)
       if (b.max.y <= fromY + 0.5 && top > fy) fy = top;

@@ -104,7 +104,7 @@ function tintWall(c) {
   return (r << 16) | (g << 8) | b;
 }
 
-function addBuilding(x, z, w, d, h, style, isReal, rot, railPass) {
+function addBuilding(x, z, w, d, h, style, isReal, rot) {
   const _origH = h; // 遠方アンロード時、再生成できるよう元のhを覚えておく(下でhを斜面ぶん延長するため)
   // 4隅+中心の地形高さを見て、最低点を基礎にし最高点まで胴体を延長。
   // (中心1点だけだと斜面で山側が埋まり、谷側が浮いていた)
@@ -382,24 +382,6 @@ function addBuilding(x, z, w, d, h, style, isReal, rot, railPass) {
     parts.push(addDecorLight(0x8040ff, 0.8, 15, x, gy + h*0.6, z));
   }
 
-  // 【2026-07-16】線路またぎ建物(駅ビル等)は通り抜けできることが見て分かるよう半透明にする。
-  // 材質はlambertMat/facadeMatの共有キャッシュ由来なので直接いじらず、この建物内で
-  // 使われている材質ごとに1回だけcloneして差し替える(駅ビルは数が少ないので増殖は軽微)。
-  if (railPass && railPass.length) {
-    const _matClones = new Map();
-    for (const p of parts) {
-      if (!p.material || !p.material.clone) continue;
-      let mc = _matClones.get(p.material);
-      if (!mc) {
-        mc = p.material.clone();
-        mc.transparent = true;
-        mc.opacity = 0.55;
-        _matClones.set(p.material, mc);
-      }
-      p.material = mc;
-    }
-  }
-
   // 【重要・2026-07-16】実OSM建物の向き(rot)を反映する。各パーツは軸平行前提の絶対座標で
   // 組み立てられているので、最後に建物中心(x,z)周りでまとめて剛体回転させる
   // (親Groupにrotation.y=rotを付けたのと同じ変換: 位置の回転+各パーツ自身のyaw加算)。
@@ -430,12 +412,7 @@ function addBuilding(x, z, w, d, h, style, isReal, rot, railPass) {
     new THREE.Vector3(_bMinX, gy, _bMinZ),
     new THREE.Vector3(_bMaxX, gy + h, _bMaxZ)
   );
-  if (rot || (railPass && railPass.length)) {
-    cbox.rot = rot || 0; cbox.cx = x; cbox.cz = z; cbox.hw = w / 2; cbox.hd = d / 2;
-    // 線路またぎ建物(駅ビル等): この帯の内側は当たり判定を透過(collBoxHitsXZ参照)。
-    // 屋根判定(floorHeightAt)は帯を無視して全面有効(屋根に見えない穴を作らない)。
-    if (railPass && railPass.length) cbox.pass = railPass;
-  }
+  if (rot) { cbox.rot = rot; cbox.cx = x; cbox.cz = z; cbox.hw = w / 2; cbox.hd = d / 2; }
   cbox.chunkKey = currentChunkKey;
   // 実OSM建物を遠方アンロードする際、collisionBoxes/minimapBuildings/placedBuildings
   // からもこのbuilding分だけ一括で取り除けるよう、共通のIDを振っておく。
