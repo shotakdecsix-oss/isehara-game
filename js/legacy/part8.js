@@ -514,6 +514,12 @@ function generateChunk(chunkX, chunkZ) {
   // スタイルを選んでいるので影響なし、ここで絞るのは1)/3)の一戸建て限定パスだけ)。
   const NON_HOUSE_LU = new Set(['industrial', 'commercial', 'retail', 'mixed_use']);
   // 判定の優先順位:
+  //  0) 本物のOSM建物のフットプリント(中心±w/2,d/2+余白)に候補地点自体が入っている →
+  //     landuse判定より前に、無条件で建てない(【重要・2026-07-16】東京駅周辺で
+  //     landuse=residentialの粗いゾーニングが実際には大きな商業ビルの敷地まで覆っており、
+  //     3)の分岐が本物の建物の有無を一切見ずに無条件でtrueを返してしまうため、procedural-
+  //     infill-race対策のknownBuildingGrid導入後も一戸建てが本物の建物に重なって
+  //     生成され続けていた。詳細は[[project_isehara_game_procedural_infill_race]]参照)。
   //  1) inAvoid → 田畑・山林・公園・水域には絶対に建てない
   //  2) landuseがindustrial/commercial/retail/mixed_use → 工場・商業地には建てない
   //  3) landuse=residential → 建ててよい(実データの裏付けあり)
@@ -523,6 +529,7 @@ function generateChunk(chunkX, chunkZ) {
   //     を根拠に補完してよいことにする。工場・商業・農地・山林・公園・水域は1)2)で
   //     既に弾かれているので、ここが誤って工場等に効くことはない。
   const buildable = (qx, qz) => {
+    if (isInsideKnownRealBuilding(qx, qz)) return false;
     if (inAvoid(qx, qz)) return false;
     const lu = luTypeAt(qx, qz);
     if (lu && NON_HOUSE_LU.has(lu)) return false;
@@ -586,6 +593,12 @@ function generateChunk(chunkX, chunkZ) {
         const jx = bx + (Math.random()-0.5)*step*0.4;
         const jz = bz + (Math.random()-0.5)*step*0.4;
         if (inAvoid(jx, jz)) continue; // 田畑・森・公園・水域は埋めない
+        // 【重要・2026-07-16】このループはbuildable()を通らずlanduseポリゴン全体を直接
+        // グリッド充填するため、isInsideKnownRealBuildingのガードが効いていなかった。
+        // hasBuildingNearby(既存建物との数m間隔の空け)だけでは、本物の大きい建物の
+        // フットプリント内に手続き生成の建物が重なって生成されるのを防げない
+        // (東京駅周辺での住宅密集バグの主因の一つ。[[project_isehara_game_procedural_infill_race]])。
+        if (isInsideKnownRealBuilding(jx, jz)) continue;
         const bw = isRes ? 7+Math.random()*5 : isCom ? 12+Math.random()*14 : 25+Math.random()*25;
         const bd = isRes ? 6.5+Math.random()*4.5 : isCom ? 10+Math.random()*12 : 20+Math.random()*20;
         if (isOnRoad(jx, jz, bw, bd)) continue;

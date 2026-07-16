@@ -776,6 +776,33 @@ function hasRealHouseNearby(cx, cz, dist) {
   return false;
 }
 
+// 【重要・2026-07-16】buildable()の判定順(part8.js)では、landuse=residentialの区画内なら
+// 本物の建物の有無に関係なく無条件でtrue(一戸建て補完OK)を返していた。日本のOSMの
+// landuse=residentialポリゴンは粗く、実際には大きな商業ビル・オフィスビルの敷地まで
+// 覆っていることが多い(特に東京駅周辺のような複合用途エリア)。knownBuildingGridに
+// 本物の建物が「登録済み」でも、hasRealBuildingNearby/hasRealHouseNearbyは
+// buildable()の4)の分岐(landuseタグ無しの場合)でしか参照されておらず、3)の
+// landuse=residential分岐では一切チェックされていなかったため、procedural-infill-race
+// 対策(knownBuildingGridの導入)をしても「実は本物の大きい建物がここにある」場所に
+// 一戸建てが重なって建ち続けていた(実機報告: 東京駅周辺で本物の建物が0件、手続き生成の
+// 小さい住宅のみ100%というdiag結果で発覚)。landuseの判定より前に効く、本物の建物の
+// 実フットプリント(中心x,z ± w/2,d/2 に余白pad)に候補地点が入っているかどうかの
+// 直接判定を追加し、どの分岐であっても本物の建物に重ねて一戸建てを建てないようにする。
+function isInsideKnownRealBuilding(qx, qz, pad) {
+  pad = pad || 3;
+  const gx = Math.floor(qx / BUILDING_CELL), gz = Math.floor(qz / BUILDING_CELL);
+  for (let dgx = -1; dgx <= 1; dgx++) for (let dgz = -1; dgz <= 1; dgz++) {
+    const arr = knownBuildingGrid.get((gx + dgx) + ',' + (gz + dgz));
+    if (!arr) continue;
+    for (const rec of arr) {
+      if (!rec.real) continue;
+      const hw = (rec.w || 8) / 2 + pad, hd = (rec.d || 8) / 2 + pad;
+      if (qx >= rec.x - hw && qx <= rec.x + hw && qz >= rec.z - hd && qz <= rec.z + hd) return true;
+    }
+  }
+  return false;
+}
+
 // ======= PLAYER CHARACTER (少年/少女 選択可・普通の格好) =======
 // 以前は魔法使い風(とんがり帽子・マント・杖・光る玉)だったが、素朴な少年/少女の
 // 見た目に変更した(マント・杖・光る玉は削除、帽子は少年の短い髪に置き換え)。
