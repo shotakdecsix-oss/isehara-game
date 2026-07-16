@@ -389,6 +389,7 @@ function addBuilding(x, z, w, d, h, style, isReal, rot) {
   if (rot) {
     const rc = Math.cos(rot), rs = Math.sin(rot);
     for (const p of parts) {
+      if (!p || !p.position) continue; // partsにはnull要素が入りうる(unloadFarBuildings等の既存ガードと同様)
       const dx0 = p.position.x - x, dz0 = p.position.z - z;
       p.position.x = x + dx0 * rc + dz0 * rs;
       p.position.z = z - dx0 * rs + dz0 * rc;
