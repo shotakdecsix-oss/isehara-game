@@ -708,9 +708,13 @@ function generateChunk(chunkX, chunkZ) {
   for (const poly of nearLanduse) {
     const lu = poly.lu;
     const isRes = lu === 'residential';
-    const isCom = lu === 'commercial' || lu === 'retail' || lu === 'mixed_use';
-    const step     = isRes ? 14 : isCom ? 17 : 34;
-    const fillRate = isRes ? 0.65 : isCom ? 0.65 : 0.5;
+    // 【2026-07-16】手続き生成は「低層住宅のみ」に限定(ユーザー方針: 中規模以上の建物は
+    // OSMマップデータに掲載されている前提を置く)。商業・工業系landuseの手続き充填
+    // (12〜50m幅・8〜24m高のビル・工場の自動生成)は廃止し、実データの無い空白は
+    // 空き地のままにする。日本のOSMは住宅の掲載漏れが多い一方、中規模以上の建物は
+    // ほぼ掲載されているため、この前提の方が実景に近い。
+    if (!isRes) continue;
+    const step = 14, fillRate = 0.65;
 
     for (let bx = worldX; bx < worldX + CHUNK_SIZE; bx += step) {
       for (let bz = worldZ; bz < worldZ + CHUNK_SIZE; bz += step) {
@@ -725,21 +729,14 @@ function generateChunk(chunkX, chunkZ) {
         // フットプリント内に手続き生成の建物が重なって生成されるのを防げない
         // (東京駅周辺での住宅密集バグの主因の一つ。[[project_isehara_game_procedural_infill_race]])。
         if (isInsideKnownRealBuilding(jx, jz)) continue;
-        const bw = isRes ? 7+Math.random()*5 : isCom ? 12+Math.random()*14 : 25+Math.random()*25;
-        const bd = isRes ? 6.5+Math.random()*4.5 : isCom ? 10+Math.random()*12 : 20+Math.random()*20;
+        const bw = 7+Math.random()*5;
+        const bd = 6.5+Math.random()*4.5;
         if (isOnRoad(jx, jz, bw, bd)) continue;
         if (hasBuildingNearby(jx, jz, Math.max(bw,bd)/2+1.5)) continue;
-        // 住宅地はほぼ2階建て、たまに低層アパート(日本の郊外の実感に寄せる)
-        const bh = isRes ? (Math.random() < 0.15 ? 8+Math.random()*6 : 4+Math.random()*3.5)
-                 : isCom ? 8+Math.random()*16 : 6+Math.random()*8;
-        let style = isRes
-          ? { color:0xc8a060, roofColor:0x8a5828, type:'house' }
-          : isCom
-          ? { color:0xf09050, roofColor:0xb05020, type:'shop' }
-          : { color:0x909898, roofColor:0x606868, type:'industrial' };
-        style = classifyResidential(style, bw, bd, bh, jx, jz); // 高さ・面積が閾値超えならマンション/オフィス扱いに
-        const _f1 = applySizeFloor(style, bw, bd, bh); // マンション・工場は最低サイズを底上げ
-        addBuilding(jx, jz, _f1.w, _f1.d, _f1.h, style);
+        // 低層住宅のみ: ほぼ2階建て(低層アパート枝・classifyResidentialによる
+        // マンション/オフィス昇格・applySizeFloorの大型化は手続き生成では行わない)
+        const bh = 4+Math.random()*3.5;
+        addBuilding(jx, jz, bw, bd, bh, { color:0xc8a060, roofColor:0x8a5828, type:'house' });
       }
     }
   }
@@ -761,10 +758,9 @@ function generateChunk(chunkX, chunkZ) {
         if (isOnRoad(jx, jz, bw, bd)) continue;
         if (hasBuildingNearby(jx, jz, Math.max(bw, bd) / 2 + 1.5)) continue;
         const pal = HOUSE_PALETTE[(Math.random() * HOUSE_PALETTE.length) | 0];
-        const bh = Math.random() < 0.12 ? 8 + Math.random() * 5 : 4 + Math.random() * 3.5;
-        const style = classifyResidential({ color: pal.w, roofColor: pal.r, type: 'house' }, bw, bd, bh, jx, jz);
-        const _f2 = applySizeFloor(style, bw, bd, bh); // マンションになったら最低サイズを底上げ
-        addBuilding(jx, jz, _f2.w, _f2.d, _f2.h, style);
+        // 【2026-07-16】低層住宅のみ: 8m超(3階以上)の枝とマンション昇格を廃止
+        const bh = 4 + Math.random() * 3.5;
+        addBuilding(jx, jz, bw, bd, bh, { color: pal.w, roofColor: pal.r, type: 'house' });
       }
     }
   }
@@ -1020,15 +1016,26 @@ function updateChunks() {
 // (地形→道路→建物→木の順を守るためのゲート。以前はチャンクの建物生成が
 //  minimapRoads にその時点で乗っている道路だけを見て進んでしまい、後から
 //  非同期でタイルの道路データが届くと、既に建てた建物に道路が遮られていた)
-function chunkTilesReady(chunkX, chunkZ) {
-  const x0 = chunkX * CHUNK_SIZE, z0 = chunkZ * CHUNK_SIZE;
-  const x1 = x0 + CHUNK_SIZE, z1 = z0 + CHUNK_SIZE;
-  const txs = [Math.floor(x0 / OSM_TILE_M), Math.floor(x1 / OSM_TILE_M)];
-  const tzs = [Math.floor(z0 / OSM_TILE_M), Math.floor(z1 / OSM_TILE_M)];
-  for (const tx of txs) for (const tz of tzs) {
+// 指定点の周囲pad(m)がかかる全OSMタイルの道路が確定済みか。
+// 【2026-07-16】「地形→道路・線路→建物」の順序をタイル境界でも守るための共通ゲート。
+// 自タイルの道路はprocessTileDataで建物より先に同期登録されるが、タイル境界から
+// pad以内の場所は隣タイルの道路が後から届く可能性があり、それを知らずに建物を
+// 生成するとisOnRoad/fitRealBuildingToRoadsが道路を避けられず被りが起きる。
+// padは「最大道路半幅+マージン」を意図した64m(1タイル1600mに対して十分小さいので、
+// 境界付近の建物・チャンクだけが隣タイルを追加で待つことになる)。
+function osmTilesReadyAround(x, z, pad) {
+  const t0x = Math.floor((x - pad) / OSM_TILE_M), t1x = Math.floor((x + pad) / OSM_TILE_M);
+  const t0z = Math.floor((z - pad) / OSM_TILE_M), t1z = Math.floor((z + pad) / OSM_TILE_M);
+  for (let tx = t0x; tx <= t1x; tx++) for (let tz = t0z; tz <= t1z; tz++) {
     if (!loadedOSMTiles.has(`${tx},${tz}`)) return false;
   }
   return true;
+}
+function chunkTilesReady(chunkX, chunkZ) {
+  // 【2026-07-16】以前はチャンクの四隅が乗るタイルだけ確認しており、境界から60m内側を
+  // 通る隣タイルの道路を待たずに手続き生成が走るレースがあった。余白64m込みで待つ。
+  const cx = chunkX * CHUNK_SIZE + CHUNK_SIZE / 2, cz = chunkZ * CHUNK_SIZE + CHUNK_SIZE / 2;
+  return osmTilesReadyAround(cx, cz, CHUNK_SIZE / 2 + 64);
 }
 
 // このチャンクが、プレイヤー追従の高解像度NEAR地形グリッドの範囲内に収まっているか。
