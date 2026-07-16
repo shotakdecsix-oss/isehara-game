@@ -109,15 +109,28 @@ const INJECT = `<script>
   const lastDirectAt = {};
   const DIRECT_MIN_INTERVAL_MS = 1100; // サーバ側のMIN_INTERVAL_MSと揃える
   const PROXY_RETRY_MS = 120000; // 2分ごとにプロキシへの復帰を試す(一時的な不調で永久固定されないように)
+  // 【重要・2026-07-16】direct()の「最終アクセス時刻を見てwait時間を計算→sleep→時刻更新」は
+  // 単純な read-modify-write で、呼び出し側(part8.jsはOSM_TILE_CONCURRENCY=2で並行に
+  // fetchOSMTileBatchを呼ぶ)が同時に2回direct()を呼ぶと、両方とも更新前の古いlastDirectAtを
+  // 読んでほぼ同じwait時間を計算し、ほぼ同時にorigFetchを発火してしまう競合状態だった
+  // (実機で確認: 京橋・八重洲でdirect()経由のfetchが立て続けに429 Too Many Requestsになる
+  // 事象と一致)。プレフィックスごとにPromiseチェーンで直列化し、「待つ→時刻更新」を
+  // 呼び出しごとに確実に1つずつ順番に処理させる(server.js側のscheduleUpstreamと同じ考え方)。
+  const directChains = {};
   const origFetch = window.fetch.bind(window);
   window.fetch = function(input, init) {
     let url = (typeof input === 'string') ? input : (input && input.url) || '';
     for (const [prefix, local] of MAP) {
       if (url.startsWith(prefix)) {
         const direct = async () => {
-          const wait = (lastDirectAt[prefix] || 0) + DIRECT_MIN_INTERVAL_MS - Date.now();
-          if (wait > 0) await new Promise((r) => setTimeout(r, wait));
-          lastDirectAt[prefix] = Date.now();
+          const prevChain = directChains[prefix] || Promise.resolve();
+          const myTurn = prevChain.then(async () => {
+            const wait = (lastDirectAt[prefix] || 0) + DIRECT_MIN_INTERVAL_MS - Date.now();
+            if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+            lastDirectAt[prefix] = Date.now();
+          });
+          directChains[prefix] = myTurn.catch(() => {}); // 1件失敗してもチェーンは継続
+          await myTurn;
           return origFetch(url, init);
         };
         const downSince = proxyDown[prefix];

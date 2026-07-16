@@ -264,8 +264,18 @@ const OSM_TILE_CLAUSES = [
 // 一度に何十枚も新規タイルが必要になるが、Overpassは1ホスト1.1秒間隔の直列制限
 // (server.js)のため「1タイル=1リクエスト」だと平常時の10〜数十倍待たされていた。
 // Overpass QLは (clause(bbox1);clause(bbox2);...) のようにbboxをunionで束ねて
-// 1クエリに収められるので、近い順に最大6枚まとめて1往復で取得する。
-const OSM_TILE_BATCH = 6;
+// 1クエリに収められるので、近い順にまとめて1往復で取得する。
+// 【重要・2026-07-16】以前は6枚まとめだったが、京橋・八重洲のような超高密度エリアで
+// 実機診断した結果、6タイルまとめ(15種類の条件節×6=90節)はOverpassのインフラ側で
+// 504 Gateway Timeoutになることを直接確認した。一方、同じ場所で3タイル(約14秒)・
+// 4タイル(約26秒)まとめは正常に成功することも確認済み。密集地で6タイルが失敗するたびに
+// 該当タイルだけ1枚単位に縮小して再試行する対策も入れたが、これは「1タイル=1リクエスト」
+// に戻ってしまうため、大きなバックログ(60タイル以上)がある状況では逆にリクエスト数が
+// 急増し、サーバー側の直列キュー(1.1秒間隔/ホスト)・直接モードのペース配分の両方を
+// 詰まらせ、429/502/504が連鎖する新たな不具合を実機で確認した。まずデフォルトのバッチ
+// サイズ自体を余裕を持って安全な3に下げ、超高密度エリアでも極力初回から成功させる
+// (=1枚単位への緊急縮小が滅多に発動しないようにする)方針に変更する。
+const OSM_TILE_BATCH = 3;
 function buildOSMBatchQuery(bboxes) {
   const parts = [];
   for (const clause of OSM_TILE_CLAUSES) for (const bb of bboxes) parts.push(clause + '(' + bb + ');');
@@ -299,11 +309,20 @@ async function fetchOSMTileBatch() {
   // 1秒程度で正常に返る。以前は「6タイルまとめ→失敗→同じ6タイルまとめで再試行」を
   // 繰り返し、4回失敗すると諦めてloadedOSMTiles扱いにしてしまい、実データが永久に
   // 手に入らないまま(=建物もlanduseも無いので手続き生成の充填条件も満たせず)空き地が
-  // 残っていた。次に取り出すタイルに失敗履歴(osmTileFailCount>0)があれば、超高密度
-  // エリアの可能性を疑ってバッチサイズを1枚まで縮小し、軽いクエリで確実に成功させる。
+  // 残っていた。
+  // 【重要・2026-07-16追記】「失敗履歴が1回でもあれば1枚まで縮小」という対策を入れたが、
+  // 実機診断でこれが新たな不具合を引き起こすことを確認した: ジャンプ直後などタイルの
+  // バックログが60件規模になる状況では、6枚まとめ(既定値。この時点ではまだ3への変更前)が
+  // 軒並み失敗→即座に「1タイル=1リクエスト」へ戻ってしまい、サーバー側の直列キュー
+  // (ホストごと1.1秒間隔)や直接モードのペース配分を詰まらせ、429/502/504が連鎖する
+  // (実機で確認: 通常1秒で返るはずのクエリが35秒〜2分待たされ、最終的に502/429)。
+  // 既定バッチをそもそも3に下げたことで6枚起因の504自体は初回からほぼ回避できる想定
+  // なので、1枚への緊急縮小は「同じタイルで2回以上失敗した」場合だけの最終手段に留め、
+  // 1回目の失敗はまず既定バッチサイズのまま(混雑等の一時的な要因の可能性を優先して)
+  // 再試行させ、リクエスト数の急増を防ぐ。
   const nextTile = osmTileQueue[0];
-  const nextFailed = nextTile && (osmTileFailCount.get(nextTile.tx + ',' + nextTile.tz) || 0) > 0;
-  const batchSize = (!loadedOSMTiles.has(ptKey) || nextFailed) ? 1 : OSM_TILE_BATCH;
+  const nextFailCount = nextTile ? (osmTileFailCount.get(nextTile.tx + ',' + nextTile.tz) || 0) : 0;
+  const batchSize = (!loadedOSMTiles.has(ptKey) || nextFailCount >= 2) ? 1 : OSM_TILE_BATCH;
   const batch = osmTileQueue.splice(0, batchSize); // 近い順
   const keys = batch.map(({tx, tz}) => `${tx},${tz}`);
   const bboxes = batch.map(({tx, tz}) => {
