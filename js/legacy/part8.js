@@ -292,7 +292,19 @@ async function fetchOSMTileBatch() {
   // ジャンプ後「道路が出るまで1〜2分」の主因だった(同時実行枠は1IPあたり2つしかない)。
   // 現在地のタイルが確定したら、従来どおり6枚まとめで効率よく外側を埋める。
   const ptKey = `${Math.floor(player.position.x / OSM_TILE_M)},${Math.floor(player.position.z / OSM_TILE_M)}`;
-  const batch = osmTileQueue.splice(0, loadedOSMTiles.has(ptKey) ? OSM_TILE_BATCH : 1); // 近い順
+  // 【重要・2026-07-16】京橋・八重洲のような超高密度エリアで実機診断した結果、6タイル
+  // まとめクエリ(道路+建物+relation building+landuse等15種類×6タイル分)がOverpassの
+  // 応答インフラ側で504 Gateway Timeoutになることを確認(内部の[timeout:N]指定より手前の
+  // リバースプロキシ側の上限に当たっている)。一方、同じ場所を1タイル単体でクエリすると
+  // 1秒程度で正常に返る。以前は「6タイルまとめ→失敗→同じ6タイルまとめで再試行」を
+  // 繰り返し、4回失敗すると諦めてloadedOSMTiles扱いにしてしまい、実データが永久に
+  // 手に入らないまま(=建物もlanduseも無いので手続き生成の充填条件も満たせず)空き地が
+  // 残っていた。次に取り出すタイルに失敗履歴(osmTileFailCount>0)があれば、超高密度
+  // エリアの可能性を疑ってバッチサイズを1枚まで縮小し、軽いクエリで確実に成功させる。
+  const nextTile = osmTileQueue[0];
+  const nextFailed = nextTile && (osmTileFailCount.get(nextTile.tx + ',' + nextTile.tz) || 0) > 0;
+  const batchSize = (!loadedOSMTiles.has(ptKey) || nextFailed) ? 1 : OSM_TILE_BATCH;
+  const batch = osmTileQueue.splice(0, batchSize); // 近い順
   const keys = batch.map(({tx, tz}) => `${tx},${tz}`);
   const bboxes = batch.map(({tx, tz}) => {
     const worldX0 = tx * OSM_TILE_M, worldZ0 = tz * OSM_TILE_M;
