@@ -616,8 +616,10 @@ function checkOSMTiles() {
   // 5x5でも最低±3200mをカバーし、道路のアンロード距離(ROAD_UNLOAD_DIST=2500m)・
   // 実建物生成距離(BUILDING_GEN_DIST_REAL=3000m)より広いので描写の穴は生じない。
   // 進行方向の追加先読み(下)は従来どおり効くため、移動中の端到達も従来と変わらない。
-  for (let dx = -2; dx <= 2; dx++)
-    for (let dz = -2; dz <= 2; dz++)
+  // 先読み半径はパフォーマンス設定に連動(標準2=5×5。高品質は3=7×7で実建物4200mをカバー)
+  const _pfR = PERF.prefetchR;
+  for (let dx = -_pfR; dx <= _pfR; dx++)
+    for (let dz = -_pfR; dz <= _pfR; dz++)
       queueTile(px + dx * OSM_TILE_M, pz + dz * OSM_TILE_M);
   // 進行方向にさらに先まで先読み(移動中に描写の端へぶつからないように)
   const flen = Math.hypot(fdx, fdz);

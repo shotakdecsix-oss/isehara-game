@@ -104,6 +104,21 @@ body {
 }
 #charCtrl button.active { background:var(--accent); color:#fff; border-color:var(--accent); }
 
+/* 描写・パフォーマンス設定ポップオーバー(⚙タップで開閉) */
+#perfCtrl {
+  position:fixed; left:calc(var(--safe-left) + 58px); top:50%; transform:translateY(-50%);
+  border-radius:var(--hud-radius); padding:14px 16px; width:240px; z-index:35;
+  font-size:12px; display:none;
+}
+#perfCtrl.open { display:block; }
+#perfCtrl .charRow { display:flex; gap:8px; margin-top:8px; }
+#perfCtrl .charRow button {
+  flex:1; padding:8px 0; border-radius:999px; border:1px solid var(--hud-border);
+  background:rgba(255,255,255,0.08); color:var(--text); font-size:13px; cursor:pointer;
+}
+#perfCtrl .charRow button.active { background:var(--accent); color:#fff; border-color:var(--accent); }
+#perfDesc { margin-top:8px; font-size:10px; line-height:1.6; color:rgba(255,255,255,0.65); }
+
 /* ── 右上 UI非表示トグル(常時表示。スティック・ジャンプ・このボタン以外を隠す) ── */
 #uiToggleBtn {
   position:fixed; top:var(--safe-top); right:var(--safe-right);
@@ -216,7 +231,7 @@ body {
 @keyframes waterShimmer { 0%,100% { opacity:0.82; } 50% { opacity:1; } }
 /* UI非表示: スティック・ジャンプ・👁トグル以外を隠して景色を全画面で楽しむモード */
 body.uiHidden #hudRail, body.uiHidden #addressDisplay, body.uiHidden #gpsDisplay,
-body.uiHidden #seaCtrl, body.uiHidden #charCtrl, body.uiHidden #minimap, body.uiHidden #credit,
+body.uiHidden #seaCtrl, body.uiHidden #charCtrl, body.uiHidden #perfCtrl, body.uiHidden #minimap, body.uiHidden #credit,
 body.uiHidden #status, body.uiHidden #helpModal { display:none !important; }
 body.uiHidden #uiToggleBtn { opacity:0.45; }
 </style>
@@ -236,6 +251,7 @@ body.uiHidden #uiToggleBtn { opacity:0.45; }
   <button class="railBtn glass" id="jumpBtn" title="マップジャンプ">📍</button>
   <button class="railBtn glass hasSub" id="modeBtn" title="時代モード"><span class="ico" id="modeIco">🏙</span><span class="sub" id="modeSub">現実</span></button>
   <button class="railBtn glass" id="seaBtn" title="海面設定">🌊</button>
+  <button class="railBtn glass hasSub" id="perfBtn" title="描写・パフォーマンス設定"><span class="ico">⚙</span><span class="sub" id="perfSub">標準</span></button>
   <button class="railBtn glass" id="charBtn" title="キャラクター選択">🧍</button>
   <button class="railBtn glass" id="camDirBtn" title="視点回転">🔄</button>
   <button class="railBtn glass" id="helpBtn" title="操作ヘルプ">?</button>
@@ -245,6 +261,17 @@ body.uiHidden #uiToggleBtn { opacity:0.45; }
 <div id="seaCtrl" class="glass">
   🌊 海面の高さ <span id="seaVal">3.0</span>m
   <input id="seaSlider" type="range" min="-10" max="10" step="0.5" value="3">
+</div>
+
+<!-- 描写・パフォーマンス設定ポップオーバー(⚙タップで開閉) -->
+<div id="perfCtrl" class="glass">
+  ⚙ 描写範囲・負荷(変更すると再読み込みします)
+  <div class="charRow">
+    <button id="perfLiteBtn" data-preset="lite">🌱 軽量</button>
+    <button id="perfStdBtn" data-preset="std">⚖️ 標準</button>
+    <button id="perfHighBtn" data-preset="high">🏙 高品質</button>
+  </div>
+  <div id="perfDesc">軽量: 建物1.4km/低負荷(スマホ向け)<br>標準: 建物3km<br>高品質: 建物4.2km/先読み拡大(高性能PC向け)</div>
 </div>
 
 <!-- キャラクター選択ポップオーバー(🧍タップで開閉) -->

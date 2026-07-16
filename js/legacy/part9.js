@@ -10,7 +10,7 @@
 // 【2026-07-16】CHUNK_RADIUSを8(960m)へ拡大した際、森が連動して1080mまで広がると
 // 樹木の生成負荷が跳ね上がるため、森は従来の480m固定に切り離す(木は遠景での存在感が
 // 建物より小さく、フォグ距離的にも480mで十分)。
-const FOREST_R = 480;
+const FOREST_R = PERF.forestR; // パフォーマンス設定に連動(標準480m)
 const FOREST_REBUILD_STEP = CHUNK_SIZE / 2;        // 60mごとに再構築(建物の出現範囲に追従)
 const FOREST_MIN_H = 30;          // 局所比高がこの高さ(≈15m)以上を「山」とみなす(平地の街には生えない)
 const FOREST_SCATTER = 36;        // 散布グリッド間隔(m)。粗くして候補数=負荷を抑える

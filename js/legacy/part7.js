@@ -485,8 +485,43 @@ document.addEventListener('click', () => {
     charCtrlEl.classList.remove('open');
     charBtn.classList.remove('active');
   }
+  if (perfCtrlEl && perfCtrlEl.classList.contains('open')) {
+    perfCtrlEl.classList.remove('open');
+    perfBtn.classList.remove('active');
+  }
   if (gpsEl && gpsEl.classList.contains('open')) gpsEl.classList.remove('open');
 });
+
+// ======= 描写・パフォーマンス設定ポップオーバー(⚙タップで開閉、外側タップで閉じる) =======
+// 選択はlocalStorageに保存し、リロードで反映(part1.js PERF_PRESET/PERF参照。
+// 距離系はconstで各所に焼き込まれるため、モード切替と同じ「保存してリロード」方式)。
+const perfBtn = document.getElementById('perfBtn');
+const perfCtrlEl = document.getElementById('perfCtrl');
+const PERF_LABELS = { lite: '軽量', std: '標準', high: '高品質' };
+if (perfBtn && perfCtrlEl) {
+  const sub = document.getElementById('perfSub');
+  if (sub) sub.textContent = PERF_LABELS[PERF_PRESET] || '標準';
+  perfCtrlEl.querySelectorAll('.charRow button').forEach((b) => {
+    b.classList.toggle('active', b.dataset.preset === PERF_PRESET);
+    b.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (b.dataset.preset === PERF_PRESET) return; // 変更なしならリロードしない
+      try {
+        localStorage.setItem('perfPreset', b.dataset.preset);
+        // 現在地・向きを保ってリロード(モード切替・遠距離ジャンプと同じ実績ある方式)
+        const ll = xzToLatLon(player.position.x, player.position.z);
+        localStorage.setItem('iseharaResumePos',
+          JSON.stringify({ lat: ll.lat, lon: ll.lon, yaw: camYaw, rot: player.rotation.y }));
+      } catch (err) {}
+      location.reload();
+    });
+  });
+  perfBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    perfCtrlEl.classList.toggle('open');
+    perfBtn.classList.toggle('active', perfCtrlEl.classList.contains('open'));
+  });
+}
 
 // ======= キャラクター選択ポップオーバー(🧍タップで開閉、外側タップで閉じる) =======
 const charBtn = document.getElementById('charBtn');

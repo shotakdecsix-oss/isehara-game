@@ -542,13 +542,24 @@ function processRoadMeshQueue() {
 // 破棄・復元する(復元は上のrebuildRoadMeshが、プレイヤーが近づいてチャンクが再生成される
 // タイミングで自動的に行う)。高架(motorway)は橋脚がInstancedMeshで個別解放できないため
 // 対象外とする(高速道路は本数が少なく、影響は小さい)。
-// 【2026-07-16】モバイル判定。スマホはタブあたりのメモリ上限が厳しく(目安1GB前後で
-// ブラウザ/OSに強制終了される)、PCと同じ生成距離だと描画済み建物・道路のメッシュが
-// 上限を超えて「移動していると落ちる」ため、以降の保持距離系の定数を縮小する。
-// (これより後ろのBUILDING_*_DIST・CHUNK_RADIUSもIS_MOBILEを参照する)
-const IS_MOBILE = /Android|iPhone|iPad|Mobile/i.test(navigator.userAgent) ||
-  (navigator.maxTouchPoints > 1 && Math.min(screen.width, screen.height) < 900);
-const ROAD_UNLOAD_DIST = IS_MOBILE ? 1800 : 2500; // モバイルは道路メッシュの保持範囲も縮小(メモリ対策)
+// ======= 【2026-07-16】描写範囲・パフォーマンスプリセット =======
+// ⚙ボタン(index.html #perfCtrl、切替処理はpart7.js)で3段階から選択。localStorageに保存し、
+// リロードで反映(距離系はconstで各所に焼き込まれるため、モード切替と同じリロード方式)。
+// 稼働環境(PCの性能・スマホ)に合わせてユーザー自身が選ぶ。既定は「標準」。
+const PERF_PRESET = (() => {
+  try {
+    const v = localStorage.getItem('perfPreset');
+    if (v === 'lite' || v === 'high') return v;
+  } catch (e) {}
+  return 'std';
+})();
+const PERF = {
+  //       道路メッシュ保持 / 実建物 生成・消去 / 手続きチャンク半径(×120m) / 森 / タイル先読み半径(×1600m)
+  lite: { roadUnload: 1600, bGenReal: 1400, bUnloadReal: 2000, chunkR: 4,  forestR: 360, prefetchR: 2 },
+  std:  { roadUnload: 2500, bGenReal: 3000, bUnloadReal: 3800, chunkR: 8,  forestR: 480, prefetchR: 2 },
+  high: { roadUnload: 3200, bGenReal: 4200, bUnloadReal: 5200, chunkR: 10, forestR: 600, prefetchR: 3 },
+}[PERF_PRESET];
+const ROAD_UNLOAD_DIST = PERF.roadUnload;
 let _roadUnloadFrame = 0;
 function unloadFarRoads() {
   _roadUnloadFrame++;
@@ -705,13 +716,14 @@ function rebuildBuildingsInBounds(x0, x1, z0, z1) {
 // UNLOAD側は当初1000mだったが、GEN(800m)との差が小さく、少し斜めに歩いただけでも
 // 頻繁に解放→再生成を繰り返しがちだったため1500mに広げ、ヒステリシス帯を厚くした。
 // 【2026-07-16】種類別の距離に分離(ユーザー要望):
-// ・実OSM建物(real=マップデータ由来) = 3000mで生成 / 3800mで消去(モバイルは1600/2200)
+// ・実OSM建物(real=マップデータ由来) = 3000mで生成 / 3800mで消去
 // ・手続き生成建物(real=false)はチャンクシステム側(CHUNK_RADIUS)が約1000mを管理
 // ヒステリシス帯(GEN<UNLOAD)は従来同様、境界往復でのチラつき防止。
-const BUILDING_GEN_DIST_REAL = IS_MOBILE ? 1600 : 3000;
-const BUILDING_UNLOAD_DIST_REAL = IS_MOBILE ? 2200 : 3800;
+// 数値はPERFプリセット(パフォーマンス設定)から取得
+const BUILDING_GEN_DIST_REAL = PERF.bGenReal;
+const BUILDING_UNLOAD_DIST_REAL = PERF.bUnloadReal;
 const BUILDING_GEN_DIST_PROC = 1000;
-const BUILDING_UNLOAD_DIST_PROC = IS_MOBILE ? 1400 : 1800;
+const BUILDING_UNLOAD_DIST_PROC = 1800;
 let _buildingUnloadFrame = 0;
 function unloadFarBuildings() {
   _buildingUnloadFrame++;
@@ -779,8 +791,7 @@ const CHUNK_SIZE = 120;  // meters per chunk side
 // 【2026-07-16】ユーザー要望「手続き生成建物=約1000m」に合わせ 3→8(8×120=960m)。
 // チャンク数は49→289に増えるが生成はフレーム分割キューなので徐々に埋まる。
 // 重すぎる場合は6(720m)あたりに戻す候補。
-// モバイルは手続き生成も5(600m)に抑える(メモリ対策。PCは8=960m)
-const CHUNK_RADIUS = USES_MEIJI_LANDUSE ? 4 : (IS_MOBILE ? 5 : 8);
+const CHUNK_RADIUS = USES_MEIJI_LANDUSE ? 4 : PERF.chunkR; // パフォーマンス設定に連動
 
 function pointInPolygon(px, pz, pts) {
   let inside = false;
