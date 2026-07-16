@@ -584,11 +584,19 @@ function unloadFarRoads() {
   const d2 = ROAD_UNLOAD_DIST * ROAD_UNLOAD_DIST;
   const dMinor2 = MINOR_ROAD_MESH_DIST * MINOR_ROAD_MESH_DIST;
   for (const r of minimapRoads) {
-    if (r.type === 'motorway' || !r.mesh) continue; // 高架は対象外/既にアンロード済みはスキップ
+    if (r.type === 'motorway') continue; // 高架は対象外
     const mx = (r.x1 + r.x2) / 2, mz = (r.z1 + r.z2) / 2;
     const dx = mx - px, dz = mz - pz;
     const dd = dx * dx + dz * dz;
-    if (dd <= (isMinorRoadType(r.type) ? dMinor2 : d2)) continue; // まだ範囲内(細街路は短い距離で切る)
+    const lim2r = isMinorRoadType(r.type) ? dMinor2 : d2;
+    // 【2026-07-16】範囲内なのにメッシュが無い道路はここで再キューして復元する。
+    // 以前はチャンク再生成(960m)頼みだったため、細街路の保持距離(1100m)との間に
+    // 「再接近しても細い道路が生成されない帯」ができていた(実機報告)。
+    if (!r.mesh) {
+      if (dd <= lim2r) queueRoadMesh(r);
+      continue;
+    }
+    if (dd <= lim2r) continue; // まだ範囲内(細街路は短い距離で切る)
     scene.remove(r.mesh);
     r.mesh.geometry.dispose();
     r.mesh = null;
@@ -748,7 +756,14 @@ function unloadFarBuildings() {
   if (_buildingUnloadFrame % 90 !== 0) return; // 毎フレームやる必要はない(~1.5秒ごと)
   if (buildingRecords.length === 0) return;
   const px = player.position.x, pz = player.position.z;
-  const d2Real = BUILDING_UNLOAD_DIST_REAL * BUILDING_UNLOAD_DIST_REAL;
+  // 【2026-07-16】総数上限(PERF.bMax)付近では、実建物の消去距離をヒステリシス上限
+  // (2900m)ではなく生成距離(2200m)まで詰める。上限到達中は「移動先の新しい建物」が
+  // dormant行きになる一方、後方の建物が2900mを超えるまで枠が空かず、移動先の道路沿いに
+  // 建物が建たない「枠詰まり」が起きていた(実機報告: 高所移動で拡張した道路に建物なし)。
+  // 上限に余裕がある通常時は従来のヒステリシスでチラつきを防ぐ。
+  const _nearCap = buildingRecords.length >= PERF.bMax * 0.95;
+  const _realLim = _nearCap ? BUILDING_GEN_DIST_REAL : BUILDING_UNLOAD_DIST_REAL;
+  const d2Real = _realLim * _realLim;
   const d2Proc = BUILDING_UNLOAD_DIST_PROC * BUILDING_UNLOAD_DIST_PROC;
   const removeIds = new Set();
   for (let i = buildingRecords.length - 1; i >= 0; i--) {
