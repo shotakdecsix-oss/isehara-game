@@ -311,8 +311,71 @@ function roadGridAdd(r) {
     arr.push(r);
   }
 }
+// 【2026-07-16】後から届いた道路・線路と重なっている既存建物を撤去する。
+// 「地形→道路→建物」の順序ゲート(osmTilesReadyAround)には1つ穴があり、タイルが
+// 4回失敗して「諦めてloaded扱い」になると道路ゼロのままゲートが通って建物が先に建つ。
+// その後の背景リトライで道路データが届いた時、道路の上に建物が居座ったままになっていた
+// (移動中の拡張生成で道路生成が追いつかないケースの正体)。道路レコード登録のタイミングで
+// 重なる建物を検出し、手続き生成は削除・実建物は再キュー(今度は道路を知った状態で
+// fitRealBuildingToRoadsが縮小 or 線路ならdrop)する。
+function removeBuildingsOverlappingRoad(r) {
+  if (r.type === 'water') return;
+  if (buildingRecords.length === 0) return;
+  const rhw = (r.rw || 5) / 2 + 0.5;
+  const pad = 40; // 建物の半対角ぶんの探索余裕
+  const gx0 = Math.floor((Math.min(r.x1, r.x2) - rhw - pad) / BUILDING_CELL);
+  const gx1 = Math.floor((Math.max(r.x1, r.x2) + rhw + pad) / BUILDING_CELL);
+  const gz0 = Math.floor((Math.min(r.z1, r.z2) - rhw - pad) / BUILDING_CELL);
+  const gz1 = Math.floor((Math.max(r.z1, r.z2) + rhw + pad) / BUILDING_CELL);
+  const removeIds = new Set();
+  const seenB = new Set();
+  for (let gx = gx0; gx <= gx1; gx++) for (let gz = gz0; gz <= gz1; gz++) {
+    const arr = buildingGrid.get(gx + ',' + gz);
+    if (!arr) continue;
+    for (const rec of arr) {
+      if (rec.bid == null || seenB.has(rec.bid)) continue;
+      seenB.add(rec.bid);
+      // 建物ローカル系で道路リボンとの重なり判定(part2.js fitRealBuildingToRoadsの
+      // 線路最終チェックと同じ計算。_minAbsOverWindowはpart2.js定義、実行時参照)
+      const c = Math.cos(rec.rot || 0), s = Math.sin(rec.rot || 0);
+      const hw = rec.w / 2, hd = rec.d / 2;
+      const ax = r.x1 - rec.x, az = r.z1 - rec.z, bx = r.x2 - rec.x, bz = r.z2 - rec.z;
+      const au = ax * c - az * s, av = ax * s + az * c;
+      const bu = bx * c - bz * s, bv = bx * s + bz * c;
+      const du = bu - au, dv = bv - av;
+      let overlap;
+      if (Math.abs(du) >= Math.abs(dv)) {
+        const vmin = _minAbsOverWindow(au, av, du, dv, hw + rhw);
+        overlap = vmin !== null && vmin < hd + rhw;
+      } else {
+        const umin = _minAbsOverWindow(av, au, dv, du, hd + rhw);
+        overlap = umin !== null && umin < hw + rhw;
+      }
+      if (!overlap) continue;
+      for (const p of rec.parts) {
+        if (!p) continue;
+        scene.remove(p);
+        if (p.geometry && !p.geometry.userData.shared) p.geometry.dispose();
+      }
+      removeIds.add(rec.bid);
+      if (rec.real) {
+        pendingBuildings.push({ x: rec.x, z: rec.z, w: rec.w, d: rec.d, h: rec.h,
+          style: rec.style, real: true, rot: rec.rot }); // _fit無し→再fitされる
+      }
+    }
+  }
+  if (removeIds.size === 0) return;
+  for (let i = buildingRecords.length - 1; i >= 0; i--) {
+    if (removeIds.has(buildingRecords[i].bid)) buildingRecords.splice(i, 1);
+  }
+  collisionBoxes = collisionBoxes.filter(b => !removeIds.has(b.buildingId));
+  minimapBuildings = minimapBuildings.filter(b => !removeIds.has(b.bid));
+  placedBuildings = placedBuildings.filter(b => !removeIds.has(b.bid));
+  rebuildCollGrid();
+  rebuildBuildingGrid();
+}
 // minimapRoads.push の共通化: 記録と同時に空間グリッドへ登録
-function addRoadRecord(r) { minimapRoads.push(r); roadGridAdd(r); }
+function addRoadRecord(r) { minimapRoads.push(r); roadGridAdd(r); removeBuildingsOverlappingRoad(r); }
 // 矩形範囲にかかる可能性のある道路だけを空間ハッシュから拾う(minimapRoads全件走査を避ける)
 function queryRoadGrid(x0, x1, z0, z1) {
   const gx0 = Math.floor(x0 / ROAD_CELL), gx1 = Math.floor(x1 / ROAD_CELL);

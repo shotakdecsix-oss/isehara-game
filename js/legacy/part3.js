@@ -312,11 +312,38 @@ function addBuilding(x, z, w, d, h, style, isReal, rot) {
         if (Math.random() < 0.35)
           dm(UNIT_CYL, lambertMat(0x888888), x - w * 0.05, gy + h + 2, z + d * 0.2, 0.1, 4, 0.1);
       }
-      // 工場: 遠くからでも「工場」と分かるよう煙突を1本立てる(白/赤の縞、屋根より確実に高い)
+      // 【2026-07-16】工業系のレパートリー拡充(従来は全棟「煙突付き工場」で単調だった)。
+      // 4種を抽選: 煙突工場35% / 倉庫・物流センター30% / タンク併設プラント20% / のこぎり屋根工場15%。
+      // どのパーツもparts経由なので回転建物にも正しく追従する(座標は回転前の軸平行系で指定)。
       if (type === 'industrial') {
-        const chH = h * 0.9 + 4;
-        dm(UNIT_CYL, lambertMat(0xd8d8d0), x - w * 0.32, gy + h + chH / 2, z - d * 0.28, 1.3, chH, 1.3);
-        dm(UNIT_CYL, lambertMat(0xcc3322), x - w * 0.32, gy + h + chH - 0.6, z - d * 0.28, 1.34, 1.2, 1.34);
+        const iv = Math.random();
+        if (iv < 0.35) {
+          // 煙突工場(従来): 白/赤の縞、屋根より確実に高い
+          const chH = h * 0.9 + 4;
+          dm(UNIT_CYL, lambertMat(0xd8d8d0), x - w * 0.32, gy + h + chH / 2, z - d * 0.28, 1.3, chH, 1.3);
+          dm(UNIT_CYL, lambertMat(0xcc3322), x - w * 0.32, gy + h + chH - 0.6, z - d * 0.28, 1.34, 1.2, 1.34);
+        } else if (iv < 0.65) {
+          // 倉庫・物流センター: 煙突なし、屋上に大型空調・換気塔を並べる
+          dm(UNIT_BOX, AC_MAT, x + w * 0.25, gy + h + 0.7, z - d * 0.2, 3.2, 1.4, 2.2);
+          dm(UNIT_BOX, AC_MAT, x - w * 0.12, gy + h + 0.7, z + d * 0.24, 3.2, 1.4, 2.2);
+          dm(UNIT_CYL, lambertMat(0xb8bcc0), x + w * 0.05, gy + h + 1.1, z + d * 0.02, 1.0, 2.2, 1.0);
+        } else if (iv < 0.85) {
+          // プラント: 銀色の縦型タンク(サイロ)を敷地側縁に2〜3基
+          const nSilo = 2 + (Math.random() * 2 | 0);
+          const sh = h * 0.8 + 3;
+          for (let si = 0; si < nSilo; si++) {
+            const sx = x + w * 0.38, sz = z - d * 0.35 + si * Math.min(6, d * 0.35);
+            dm(UNIT_CYL, TANK_MAT, sx, gy + sh / 2, sz, 2.4, sh, 2.4);
+            dm(UNIT_CYL, TANK_MAT, sx, gy + sh + 0.4, sz, 1.6, 0.8, 1.6); // 上部ハッチ
+          }
+        } else {
+          // のこぎり屋根工場: 屋上に片流れ屋根を等間隔に並べて工場らしいシルエットに
+          const segs = Math.max(2, Math.round(w / 8));
+          const segW = w / segs;
+          for (let si = 0; si < segs; si++) {
+            dm(SHED_GEO, roofSurfMat(0x607080, null), x - w / 2 + segW * (si + 0.5), gy + h + 1.0, z, segW * 0.96, 2.0, d * 0.96);
+          }
+        }
       }
     } else {
       // 勾配屋根: タグがあれば形状を確定。無ければ国プロファイルの重み付き抽選結果(countryPick)を
