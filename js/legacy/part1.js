@@ -201,12 +201,7 @@ const ambientLight = new THREE.AmbientLight(MODE_CONF.ambient, MODE_CONF.ambInt)
 scene.add(ambientLight);
 const moonLight = new THREE.DirectionalLight(MODE_CONF.moon, 1.8);
 moonLight.position.set(-500, 1000, -300);
-moonLight.castShadow = false;
-moonLight.shadow.mapSize.set(1024, 1024);
-moonLight.shadow.camera.near = 1;
-moonLight.shadow.camera.far = 5000;
-moonLight.shadow.camera.left = moonLight.shadow.camera.bottom = -1500;
-moonLight.shadow.camera.right = moonLight.shadow.camera.top = 1500;
+moonLight.castShadow = false; // 影は全体でrenderer.shadowMap.enabled=false(上記)なのでshadow.*設定は無意味 — CODE_REVIEW_20260717 P2で削除
 scene.add(moonLight);
 
 // Warm torch point lights — 地形読み込み後に地表高さへ再配置する(part6.js establishRegionBase 参照)

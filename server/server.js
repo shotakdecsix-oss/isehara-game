@@ -78,9 +78,10 @@ const DEPLOY_INFO_SCRIPT = `<script>window.__DEPLOY_INFO__ = ${JSON.stringify({
 
 /* ---------- index.html に注入するスクリプト ----------
  * - opentopodata / overpass への fetch を同一オリジンのプロキシに書き換え
- * - 直前のAPI応答がキャッシュヒット (X-Cache: HIT) だった場合のみ、
- *   ゲーム側のレート制限待ち setTimeout(1100ms / 1500ms) を短縮する
- *   (コールドキャッシュ時は従来どおり待つので上流にも安全)
+ * 【削除済み・CODE_REVIEW_20260717 P2】旧クライアントのレート制限待ち(1100/1500ms)を
+ * キャッシュHIT時に短縮するwindow.setTimeoutパッチがあったが、対象のsetTimeoutは既に
+ * 存在せず、part6.js側のPromise.race([updateAddressDisplay(), setTimeout 1500ms])に誤爆
+ * していた(キャッシュHIT時に国コード取得の猶予が15msに切り詰められる副作用があった)。
  */
 const INJECT = `<script>
 (() => {
@@ -89,7 +90,6 @@ const INJECT = `<script>
     ['https://overpass-api.de/api/interpreter', '/api/overpass'],
     ['https://nominatim.openstreetmap.org/reverse', '/api/nominatim'],
   ];
-  let lastApiWasCacheHit = false;
   // プロキシ経由が上流に拒否された(5xx)APIは、以後ブラウザ→上流の直接アクセスに切り替える。
   // 【背景】Renderなど共有IPのホスティングはOverpass等の公開APIにIP単位で拒否/制限される
   // ことがある(2026-07: Render経由のOverpassが502連発→道路が格子状フォールバックになる
@@ -180,7 +180,6 @@ const INJECT = `<script>
         const downSince = proxyDown[prefix];
         if (downSince && (Date.now() - downSince) < PROXY_RETRY_MS) return direct();
         return origFetch(local + url.slice(prefix.length), init).then(res => {
-          lastApiWasCacheHit = res.headers.get('X-Cache') === 'HIT';
           if (res.status >= 500) { proxyDown[prefix] = Date.now(); return direct(); }
           proxyDown[prefix] = null; // プロキシ復帰確認
           return res;
@@ -188,11 +187,6 @@ const INJECT = `<script>
       }
     }
     return origFetch(input, init);
-  };
-  const origST = window.setTimeout;
-  window.setTimeout = function(fn, delay, ...args) {
-    if ((delay === 1100 || delay === 1500) && lastApiWasCacheHit) delay = 15;
-    return origST.call(window, fn, delay, ...args);
   };
 })();
 </script>`;

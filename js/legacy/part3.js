@@ -558,52 +558,18 @@ function realRoadMat(kind, period) {
   return m;
 }
 
-// 高架橋脚・横断歩道・遮断機のインスタンスプール(現実モードのみ生成。各1ドローコール)
-const pierP = IS_REAL ? makePool(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshLambertMaterial({ color: 0x8d8f92 }), 500) : null;
+// 横断歩道のインスタンスプール(現実モードのみ生成。1ドローコール)
+// 【削除済み】pierP(高架橋脚。橋脚廃止後、参照ゼロ)/ xingBarP・xingCount・segCross・
+// addRailXing(踏切。2026-07-16踏切廃止後、参照ゼロ) — CODE_REVIEW_20260717 P2で確認・削除。
 const xwalkP = IS_REAL ? (() => {
   const p = makePool(new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2),
     new THREE.MeshBasicMaterial({ map: realRoadTex('xwalk'), transparent: true, depthWrite: false }), 250);
   p.mesh.renderOrder = 2;
   return p;
 })() : null;
-const xingBarP = IS_REAL ? (() => { // 遮断機バー(黄黒縞テクスチャ)
-  const c = document.createElement('canvas'); c.width = 32; c.height = 8;
-  const g = c.getContext('2d');
-  for (let x = 0; x < 32; x += 8) { g.fillStyle = (x / 8) % 2 ? '#181818' : '#e8c020'; g.fillRect(x, 0, 8, 8); }
-  return makePool(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(c) }), 240);
-})() : null;
 
 const railSegs = [];       // 現実モード: 線路セグメント(踏切検出・駅ホーム配置用)
 const nodeUse = new Map(); // 道路端点(1m格子)の使用回数。3以上=交差点 → 横断歩道
-let xingCount = 0;
-
-// 2線分の交差判定(端点付近5%は除外)。交点とa(道路)側の方向を返す
-function segCross(a, b) {
-  const d1x = a.x2 - a.x1, d1z = a.z2 - a.z1, d2x = b.x2 - b.x1, d2z = b.z2 - b.z1;
-  const den = d1x * d2z - d1z * d2x;
-  if (Math.abs(den) < 1e-6) return null;
-  const t = ((b.x1 - a.x1) * d2z - (b.z1 - a.z1) * d2x) / den;
-  const s = ((b.x1 - a.x1) * d1z - (b.z1 - a.z1) * d1x) / den;
-  if (t < 0.05 || t > 0.95 || s < 0.05 || s > 0.95) return null;
-  const l = Math.hypot(d1x, d1z) || 1;
-  return { x: a.x1 + d1x * t, z: a.z1 + d1z * t, nx: d1x / l, nz: d1z / l };
-}
-
-// 踏切: 道路の両側(線路手前)に警報ポール+赤灯+黄黒の遮断機バー
-function addRailXing(pt) {
-  if (!IS_REAL || xingCount >= 60) return;
-  xingCount++;
-  const pxp = -pt.nz, pzp = pt.nx;
-  for (const sd of [-1, 1]) {
-    const bx = pt.x + pt.nx * sd * 4.5, bz = pt.z + pt.nz * sd * 4.5;
-    const ppx = bx + pxp * sd * 2.8, ppz = bz + pzp * sd * 2.8;
-    const gy = getGroundY(ppx, ppz);
-    poolAdd(poleP, ppx, gy + 1.6, ppz, 0, 0.6, 0.4, 0.6);
-    poolAdd(lampP, ppx, gy + 3.1, ppz, 0, 0.8, 0.8, 0.8, 0xff3030);
-    poolAdd(xingBarP, bx + pxp * sd * 0.8, gy + 1.1, bz + pzp * sd * 0.8,
-            Math.atan2(-pzp, pxp), 4.4, 0.14, 0.14);
-  }
-}
 
 // ======= 高速道路(東名など)の高架 =======
 // 路面+防音壁+桁側面+桁裏を1つのBufferGeometry(=セグメントあたり1メッシュ)で作り、

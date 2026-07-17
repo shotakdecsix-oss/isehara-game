@@ -12,8 +12,8 @@
 // メッシュとして伊勢原本体も含め全地域で使う。伊勢原本体の高解像度データは失われない
 // (loadNearTerrain/loadWideTerrainは元々、国内なら国土地理院タイル=詳細メッシュと同じ品質の
 // データを使っている。part6.js冒頭のコメント参照)。
-const WORLD_W = (OSM_BOUNDS.maxLon - OSM_BOUNDS.minLon) * SCALE * COS_LAT;
-const WORLD_D = (OSM_BOUNDS.maxLat - OSM_BOUNDS.minLat) * SCALE;
+// 【削除済み】WORLD_W/WORLD_D — 伊勢原専用地形メッシュ廃止(2026-07-14)後、参照ゼロ。
+// CODE_REVIEW_20260717 P2で確認・削除。
 
 // 地形の色分けマテリアル(高さ別頂点カラー)。唯一の地形メッシュ(farMesh)がこれを使う。
 // polygonOffset: 海岸線(標高≈海面高さ)でfarMeshとseaMesh(part6.js)がほぼ同じ深度値になり、
