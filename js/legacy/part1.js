@@ -368,6 +368,7 @@ function removeBuildingsOverlappingRoad(r) {
   placedBuildings = placedBuildings.filter(b => !removeIds.has(b.bid));
   rebuildCollGrid();
   rebuildBuildingGrid();
+  rebuildPlacedBuildingsGrid();
 }
 // minimapRoads.push の共通化: 記録と同時に空間グリッドへ登録
 function addRoadRecord(r) { minimapRoads.push(r); roadGridAdd(r); removeBuildingsOverlappingRoad(r); }
@@ -808,6 +809,7 @@ function unloadFarBuildings() {
   placedBuildings = placedBuildings.filter(b => !removeIds.has(b.bid));
   rebuildCollGrid();
   rebuildBuildingGrid();
+  rebuildPlacedBuildingsGrid();
 }
 
 // (2026-07-16: ここにあった高度LOD(updateAltitudeLOD)は撤去。上空で遠くの低層を非表示に
@@ -840,6 +842,28 @@ function reactivateNearbyDormantBuildings() {
 }
 
 let placedBuildings = [];  // {x,z,r,ck} for landuse de-duplication
+// 【2026-07-17・CODE_REVIEW_20260717 P1】hasBuildingNearbyはplacedBuildings全件を線形走査
+// していた唯一残った「増え続ける配列の全件走査」ホットパス(generateChunkが1チャンクあたり
+// 数百候補点で呼ぶため、bMax近くまで建物が溜まった密集地では1チャンク生成=数百万回の距離
+// 計算になり得た)。buildingGrid/knownBuildingGridと同じBUILDING_CELLのセル格子に載せ替える。
+// 判定ロジック(b.r込みの距離)自体は変えない。削除時はrebuildBuildingGrid等と同じ
+// タイミングでrebuildPlacedBuildingsGrid()を呼び、同期を保つ。
+let placedBuildingsGrid = new Map();
+function placedBuildingsGridAdd(rec) {
+  const pad = (rec.r || 0) + 5;
+  const gx0 = Math.floor((rec.x - pad) / BUILDING_CELL), gx1 = Math.floor((rec.x + pad) / BUILDING_CELL);
+  const gz0 = Math.floor((rec.z - pad) / BUILDING_CELL), gz1 = Math.floor((rec.z + pad) / BUILDING_CELL);
+  for (let gx = gx0; gx <= gx1; gx++) for (let gz = gz0; gz <= gz1; gz++) {
+    const k = gx + ',' + gz;
+    let arr = placedBuildingsGrid.get(k);
+    if (!arr) { arr = []; placedBuildingsGrid.set(k, arr); }
+    arr.push(rec);
+  }
+}
+function rebuildPlacedBuildingsGrid() {
+  placedBuildingsGrid = new Map();
+  for (const rec of placedBuildings) placedBuildingsGridAdd(rec);
+}
 const landusePolygons = []; // {pts, lu, minX, maxX, minZ, maxZ} — stored during loadOSM for dynamic chunk generation
 const landuseGrid = new Map(); // polyGridAdd/queryPolyGridで使う空間ハッシュ(全件走査を避ける)
 const loadedChunks = new Set(); // "cx,cz" string keys of already-generated chunks
@@ -870,10 +894,16 @@ function pointInPolygon(px, pz, pts) {
 // 「戸建ての集まり」に見える不具合の一因になっていた。既存建物の半径ぶんも
 // 足し合わせて判定する(=「建物の縁から」minDistだけ離れているかを見る)。
 function hasBuildingNearby(cx, cz, minDist) {
-  for (const b of placedBuildings) {
-    const dx=cx-b.x, dz=cz-b.z;
-    const lim = minDist + (b.r || 0);
-    if (dx*dx+dz*dz < lim*lim) return true;
+  const gx0 = Math.floor((cx - minDist) / BUILDING_CELL), gx1 = Math.floor((cx + minDist) / BUILDING_CELL);
+  const gz0 = Math.floor((cz - minDist) / BUILDING_CELL), gz1 = Math.floor((cz + minDist) / BUILDING_CELL);
+  for (let gx = gx0; gx <= gx1; gx++) for (let gz = gz0; gz <= gz1; gz++) {
+    const arr = placedBuildingsGrid.get(gx + ',' + gz);
+    if (!arr) continue;
+    for (const b of arr) {
+      const dx = cx - b.x, dz = cz - b.z;
+      const lim = minDist + (b.r || 0);
+      if (dx*dx + dz*dz < lim*lim) return true;
+    }
   }
   return false;
 }

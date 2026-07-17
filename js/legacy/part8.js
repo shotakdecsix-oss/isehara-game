@@ -1109,7 +1109,7 @@ function updateChunks() {
       removedAny = true;
     }
   }
-  if (removedAny) { rebuildCollGrid(); rebuildBuildingGrid(); }
+  if (removedAny) { rebuildCollGrid(); rebuildBuildingGrid(); rebuildPlacedBuildingsGrid(); }
 }
 
 // このチャンクの範囲を覆うOSMタイルが全て「道路確定済み」かどうか。

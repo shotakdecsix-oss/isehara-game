@@ -455,7 +455,9 @@ function addBuilding(x, z, w, d, h, style, isReal, rot) {
   // Minimap record
   minimapBuildings.push({x, z, w, d, rot: rot || 0, ck: currentChunkKey, bid}); // rotはミニマップの回転描画用
   // Spatial index for landuse fill de-duplication
-  placedBuildings.push({x, z, r: Math.max(w,d)/2, ck: currentChunkKey, bid});
+  const _pbRec = {x, z, r: Math.max(w,d)/2, ck: currentChunkKey, bid};
+  placedBuildings.push(_pbRec);
+  placedBuildingsGridAdd(_pbRec); // hasBuildingNearby用の空間ハッシュにも同時登録(P1)
 
   // resnap用の記録(地形が後から更新された時にこのbuilding一式をY方向へ平行移動する)。
   // h/styleも保持しておき、遠方アンロード時にpendingBuildingsへ戻して再訪時に再生成できるようにする。
