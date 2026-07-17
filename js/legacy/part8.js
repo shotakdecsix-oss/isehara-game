@@ -36,6 +36,10 @@ const OSM_TILE_CONCURRENCY = 3;
 let osmTileActiveCount = 0;
 let _osmMoveUx = 0, _osmMoveUz = 0; // プレイヤーの進行方向(単位ベクトル)。取得順の前方優先に使う
 const osmTileFailCount = new Map(); // タイルごとの失敗回数(3回まで再試行)
+// 【2026-07-17・Fable5診断】タイルごとの「次回再試行可能時刻」(ms epoch)。以前は失敗時に
+// ワーカーがconcurrency枠を握ったままsleepしていたが、これを撤去して枠は即座に解放し、
+// 代わりにこのMapで各タイルの再試行間隔だけを管理する(下記fetchOSMTileBatch/processOSMTileQueue参照)。
+const osmTileNextRetryAt = new Map();
 // 【重要】標高データ+初期OSMのロード完了までタイル取得を止めるゲート。
 // 以前は起動直後からタイル取得が走り、標高ロード(約8秒)より先に完了した
 // 境界タイルの道路が「平坦な地面の高さ」で生成され、その後地形が持ち上がると
@@ -248,6 +252,16 @@ function processTileData(data, tileCount) {
 //  拡大が追いつかなかった)
 function processOSMTileQueue() {
   while (osmTileActiveCount < OSM_TILE_CONCURRENCY && osmTileQueue.length > 0) {
+    // 【2026-07-17・Fable5診断】backoff中(osmTileNextRetryAtが未来)のタイルしか
+    // 残っていない場合はここでbreakする。以前は失敗時にワーカー自身が枠を握ったまま
+    // 最大30秒sleepしていたが、それを撤去して即座に枠解放するようにしたため、
+    // ここでチェックせずにfetchOSMTileBatchを呼ぶと「即backoff判定→枠解放→whileが
+    // また回る」を同一フレーム内で無限に繰り返し、タブがフリーズしてしまう。
+    // 再試行可能なタイルが1件も無ければ、次の機会(checkOSMTilesの周期呼び出し=
+    // 最大0.5秒後)まで待つ。
+    const now = Date.now();
+    const hasEligible = osmTileQueue.some(t => (osmTileNextRetryAt.get(t.tx + ',' + t.tz) || 0) <= now);
+    if (!hasEligible) break;
     osmTileActiveCount++;
     fetchOSMTileBatch();
   }
@@ -379,7 +393,17 @@ async function fetchOSMTileBatch() {
     const dx = t.tx + 0.5 - ptx, dz = t.tz + 0.5 - ptz;
     return Math.abs(dx) + Math.abs(dz) - (dx * _osmMoveUx + dz * _osmMoveUz) * 0.8;
   };
-  osmTileQueue.sort((a, b) => _tileScore(a) - _tileScore(b));
+  // 【2026-07-17・Fable5診断】距離だけでなく、backoff中(osmTileNextRetryAtが未来)の
+  // タイルは近さに関係なく後ろへ回す。以前は「近い順」だけだったため、直近で失敗した
+  // 近傍タイルが再試行間隔を無視して毎回先頭に来て連打されてしまっていた。
+  const _now = Date.now();
+  const _tileKey = (t) => t.tx + ',' + t.tz;
+  osmTileQueue.sort((a, b) => {
+    const ra = (osmTileNextRetryAt.get(_tileKey(a)) || 0) > _now ? 1 : 0;
+    const rb = (osmTileNextRetryAt.get(_tileKey(b)) || 0) > _now ? 1 : 0;
+    if (ra !== rb) return ra - rb;
+    return _tileScore(a) - _tileScore(b);
+  });
   // ジャンプ直後(現在地のタイルすら未確定)は、まず1枚だけの小さいクエリで最速で足元の
   // 道路・建物を出す。6枚まとめの大クエリはOverpass側の実行に20〜40秒かかるため、
   // ジャンプ後「道路が出るまで1〜2分」の主因だった(同時実行枠は1IPあたり2つしかない)。
@@ -410,8 +434,18 @@ async function fetchOSMTileBatch() {
   // 1枚クエリはIndexedDBキャッシュの対象にもなる(キャッシュはタイル単位のため)。
   // 外周のタイルは従来どおり3枚まとめでリクエスト数を抑える。
   const nearSolo = nextTile && Math.max(Math.abs(nextTile.tx + 0.5 - ptx), Math.abs(nextTile.tz + 0.5 - ptz)) <= 1.6;
-  const batchSize = (!roadReadyTiles.has(ptKey) || nextFailCount >= 2 || nearSolo) ? 1 : OSM_TILE_BATCH;
-  const batch = osmTileQueue.splice(0, batchSize); // 近い順
+  let batchSize = (!roadReadyTiles.has(ptKey) || nextFailCount >= 2 || nearSolo) ? 1 : OSM_TILE_BATCH;
+  // 【2026-07-17・Fable5診断】上のソートでbackoff中のタイルは後ろへ回しているが、
+  // 先頭からbatchSize件がたまたまbackoff中のタイルを含んでしまう(=eligibleが
+  // batchSize未満しか無い)場合に備え、先頭からの「再試行可能な連続数」に丸める
+  // (processOSMTileQueue側で先頭1件は必ず再試行可能であることを保証済み)。
+  let eligibleRun = 0;
+  for (const t of osmTileQueue) {
+    if ((osmTileNextRetryAt.get(_tileKey(t)) || 0) > _now) break;
+    eligibleRun++;
+  }
+  batchSize = Math.max(1, Math.min(batchSize, eligibleRun));
+  const batch = osmTileQueue.splice(0, batchSize); // 近い順(backoff中は後回し)
   const keys = batch.map(({tx, tz}) => `${tx},${tz}`);
   const bboxes = batch.map(({tx, tz}) => {
     const worldX0 = tx * OSM_TILE_M, worldZ0 = tz * OSM_TILE_M;
@@ -447,7 +481,14 @@ async function fetchOSMTileBatch() {
   // かつosmTileFailCountは0=直近の試行では例外が飛んでいない、という状態と整合)。
   // Overpass側に指定したtimeout秒数(osmTimeoutSec)に十分なバッファ(+8秒)を足した値を
   // クライアント側のabort猶予にする。
-  const tileTimeoutMs = batch.length <= 1 ? 20000 : (osmTimeoutSec * 1000 + 8000);
+  // 【2026-07-17・Fable5診断で発見】1枚クエリだけ固定20秒でabortしていたが、
+  // buildOSMBatchQueryは1タイル時もtimeout:26を指定しており、本来は34秒(26+8)の
+  // 猶予が必要だった。密集地は計算+転送で20秒を超えることがあり、Overpassが
+  // 正常に処理中のクエリを「失敗」として扱って無限再試行させていた(ジャンプ直後は
+  // 現在地未確定+近傍が常に1枚クエリになるため、近傍だけがこのバグを踏み続け、
+  // 遠方の3枚まとめ(46秒猶予、式は同じ)だけが正常に通っていた=「遠景だけ出る」の実体)。
+  // 1枚・複数枚を問わず同じ式に統一する。
+  const tileTimeoutMs = osmTimeoutSec * 1000 + 8000;
   const abortCtl = new AbortController();
   const timeoutId = setTimeout(() => abortCtl.abort(), tileTimeoutMs);
   try {
@@ -533,6 +574,9 @@ async function fetchOSMTileBatch() {
       osmTileFailCount.set(k, n);
       if (n >= 4) roadReadyTiles.add(k); // これ以上は建物生成をブロックしない(道路は背景で取得を続ける)
       queuedTiles.delete(k); // 常に再試行対象に戻す(checkOSMTiles が再度キューに積む)
+      // 【2026-07-17・Fable5診断】以前はこの後にワーカー自身がsleepして間隔を作っていたが、
+      // 枠を握ったままのsleepを撤去したため、代わりにタイルごとの再試行可能時刻をここへ記録する。
+      osmTileNextRetryAt.set(k, Date.now() + Math.min(30000, 3000 * n));
     });
     // 現在地タイルが4回失敗して「諦めて先に進む」扱いになった場合も、sticky状態のトーストを
     // 出しっぱなしにしない(Overpass不調が長引くと「🗺 マップを読み込み中...」が永久に残るため)。
@@ -543,13 +587,17 @@ async function fetchOSMTileBatch() {
   } finally {
     clearTimeout(timeoutId); // 成功時に残ったタイマー自体の掃除(abort()は既に完了済みのfetchには無害)
   }
-  // 失敗するたびに待ち時間を延ばす(最大30秒)。連続失敗中の無駄な連打を防ぎつつ、
-  // 一時的な混雑が収まれば自動的に復帰して歯抜けが埋まる。
-  // (成功時はプロキシ側で既にレート制限済みなので、このワーカーはすぐ次のバッチへ)
-  const maxN = keys.reduce((m, k) => Math.max(m, osmTileFailCount.get(k) || 0), 0);
-  await new Promise(r => setTimeout(r, failed ? Math.min(30000, 3000 * maxN) : 200));
+  // 【2026-07-17・Fable5診断】以前は失敗時、待ち時間(最大30秒)をこのワーカーが
+  // concurrency枠(OSM_TILE_CONCURRENCY=3)を握ったままsleepしていたため、密集地で
+  // 立て続けに失敗すると3枠が同時に眠り込み、新規リクエストが一切出せない
+  // 「全枠停止」の窓が生まれ、429ストームと相互に悪化させ合っていた。
+  // → 失敗時は枠を即座に解放し、間隔調整はosmTileNextRetryAt(上のcatch内で記録済み)
+  // 側だけで守る。成功時は従来通り軽いペーシング(200ms、プロキシ側の直列化に合わせる)を残す。
+  if (!failed) {
+    await new Promise(r => setTimeout(r, 200));
+  }
   osmTileActiveCount--;
-  processOSMTileQueue(); // この枠が空いたので、キューに残りがあれば次を拾う
+  processOSMTileQueue(); // この枠が空いたので、キューに残りがあれば次を拾う(backoff中のみなら内部でbreakする)
 }
 
 // 【2026-07-16】現在地タイルの「描写完了」監視。約1.5秒ごとに、(1)現在地タイルの

@@ -161,7 +161,17 @@ const INJECT = `<script>
                 break;
               }
             }
-            if (!mirror) mirror = OVERPASS_DIRECT_MIRRORS[0]; // 全滅時は本家(part8側の再試行間隔に任せる)
+            if (!mirror) {
+              // 【2026-07-17・Fable5診断】以前は全滅時に無条件で本家固定へ戻していたため、
+              // 直前に429/5xxを食らったばかりの相手へ延々投げ続け、429ストームを
+              // 自ら悪化させていた(実機ログ: overpass-api.deへの429が連発)。
+              // 3つのうち最もbackoffの明けが早いものを選ぶ(どのみち枠は埋まっているので
+              // 「一番マシな相手」を選ぶだけ。実際の間隔調整はpart8側の再試行
+              // バックオフに任せる方針自体は変えない)。
+              mirror = OVERPASS_DIRECT_MIRRORS.reduce((best, cand) =>
+                (mirrorBackoffUntil[cand] || 0) < (mirrorBackoffUntil[best] || 0) ? cand : best,
+                OVERPASS_DIRECT_MIRRORS[0]);
+            }
             await paceThrough(mirror);
             try {
               const res = await origFetch(mirror + url.slice(prefix.length), init);
