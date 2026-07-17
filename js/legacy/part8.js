@@ -767,11 +767,8 @@ function generateChunk(chunkX, chunkZ) {
   const nearMinorRoad = (qx, qz, maxD) => {
     for (const r of nearMinor) {
       const ddx = r.x2 - r.x1, ddz = r.z2 - r.z1;
-      const l2 = ddx * ddx + ddz * ddz;
-      if (l2 < 0.01) continue;
-      const t = Math.max(0, Math.min(1, ((qx - r.x1) * ddx + (qz - r.z1) * ddz) / l2));
-      const nx2 = r.x1 + t * ddx - qx, nz2 = r.z1 + t * ddz - qz;
-      if (nx2 * nx2 + nz2 * nz2 < maxD * maxD) return true;
+      if (ddx * ddx + ddz * ddz < 0.01) continue;
+      if (distSqPointToSeg(qx, qz, r.x1, r.z1, r.x2, r.z2) < maxD * maxD) return true;
     }
     return false;
   };
@@ -909,11 +906,8 @@ function isNearWater(cx, cz, r) {
     for (const rd of arr) {
       if (rd.type !== 'water') continue;
       const rdx = rd.x2 - rd.x1, rdz = rd.z2 - rd.z1;
-      const len2 = rdx * rdx + rdz * rdz;
-      if (len2 < 0.01) continue;
-      const t = Math.max(0, Math.min(1, ((cx - rd.x1) * rdx + (cz - rd.z1) * rdz) / len2));
-      const nx = rd.x1 + t * rdx - cx, nz = rd.z1 + t * rdz - cz;
-      if (Math.sqrt(nx * nx + nz * nz) < (rd.rw || 3) / 2 + r) return true;
+      if (rdx * rdx + rdz * rdz < 0.01) continue;
+      if (Math.sqrt(distSqPointToSeg(cx, cz, rd.x1, rd.z1, rd.x2, rd.z2)) < (rd.rw || 3) / 2 + r) return true;
     }
   }
   for (const p of queryPolyGrid(minimapWaterGrid, cx - r, cx + r, cz - r, cz + r)) {

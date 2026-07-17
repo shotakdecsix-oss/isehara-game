@@ -21,6 +21,10 @@ let _forestBX = Infinity, _forestBZ = Infinity;
 // 常にプレイヤーの現在地に近い建物・道路から生成されるようにする。
 let _buildingSortFrame = 0;
 let _roadSortFrame = 0;
+// 毎フレームnewしない方針(_instMat等と同じパターン)。exploreOnUpdate/updateCameraで使い回す
+// 短命Vector3をモジュールスコープに退避(CODE_REVIEW_20260717 P11)。
+const _moveForward = new THREE.Vector3(), _moveRight = new THREE.Vector3();
+const _idealCam = new THREE.Vector3(), _occTargetPos = new THREE.Vector3();
 
 function resetPool(p) { p.n = 0; p.mesh.count = 0; p.mesh.instanceMatrix.needsUpdate = true; }
 
@@ -95,8 +99,8 @@ function exploreOnUpdate(dt) {
   const joyMag = joyActive ? Math.min(1, Math.sqrt(joyOx*joyOx + joyOz*joyOz)) : 0;
   let speed = 5 + 40 * Math.min(1, Math.pow(joyMag, 0.7) * 1.15); // 最大45m/s
   if (keys['shift']) speed = 45;
-  const forward = new THREE.Vector3(-Math.sin(camYaw), 0, -Math.cos(camYaw));
-  const right   = new THREE.Vector3( Math.cos(camYaw), 0, -Math.sin(camYaw));
+  const forward = _moveForward.set(-Math.sin(camYaw), 0, -Math.cos(camYaw));
+  const right   = _moveRight.set( Math.cos(camYaw), 0, -Math.sin(camYaw));
 
   let moveX = 0, moveZ = 0;
   let isMoving = false;
@@ -214,8 +218,8 @@ function exploreOnUpdate(dt) {
     const camX = player.position.x + Math.sin(camYaw) * camDist * Math.cos(camPitch);
     const camY = player.position.y + camHeight + camDist * Math.sin(camPitch);
     const camZ = player.position.z + Math.cos(camYaw) * camDist * Math.cos(camPitch);
-    const idealCam = new THREE.Vector3(camX, camY, camZ);
-    const safeCam = occlusionCamPos(idealCam, new THREE.Vector3(player.position.x, player.position.y + 1.5, player.position.z));
+    const idealCam = _idealCam.set(camX, camY, camZ);
+    const safeCam = occlusionCamPos(idealCam, _occTargetPos.set(player.position.x, player.position.y + 1.5, player.position.z));
     camera.position.lerp(safeCam, 0.2);
     camera.lookAt(player.position.x, player.position.y + 1.5, player.position.z);
   }

@@ -239,12 +239,17 @@ function updateGPS(t) {
 
 // ======= CAMERA OCCLUSION =======
 // If a building is between camera and player, pull camera closer
+// 【2026-07-17・CODE_REVIEW_20260717 P11】ループ内でplayerPos.clone()を毎回(最大40回/フレーム)
+// 生成していたのを、使い回しのVector3(_occDir/_occTp)に置換。挙動は変えない
+// (最終的なreturn値は新規Vector3のまま — 呼び出し側camera.position.lerpに渡る値なので
+// 使い回し変数をそのまま返すと次フレームの上書きで壊れるため、ここだけは新規生成を維持)。
+const _occDir = new THREE.Vector3(), _occTp = new THREE.Vector3();
 function occlusionCamPos(targetPos, playerPos) {
-  const dir = new THREE.Vector3().subVectors(targetPos, playerPos);
+  const dir = _occDir.subVectors(targetPos, playerPos);
   const dist = dir.length();
   dir.normalize();
   for (let d = 1.5; d < dist; d += 0.4) {
-    const tp = playerPos.clone().addScaledVector(dir, d);
+    const tp = _occTp.copy(playerPos).addScaledVector(dir, d);
     if (wouldCollide(tp.x, tp.z, tp.y - 1.2)) {
       // Return a position just before the hit
       return playerPos.clone().addScaledVector(dir, Math.max(d - 0.8, 1.5));

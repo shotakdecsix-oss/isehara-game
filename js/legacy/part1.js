@@ -634,6 +634,17 @@ function rebuildRoadsNearChunk(chunkX, chunkZ) {
   rebuildAreaPolysInBounds(x0, x1, z0, z1); // 川・公園・田畑ポリゴンも同じタイミングで合わせ直す
   rebuildBuildingsInBounds(x0, x1, z0, z1); // 建物もY方向だけ地形に合わせて追従させる
 }
+// 点(px,pz)から線分(x1,z1)-(x2,z2)までの距離の二乗(clamp-t方式)。
+// 【2026-07-17・CODE_REVIEW_20260717 P9-1】roadNear/isOnRoad(part2.js)/nearMinorRoad(part8.js)/
+// isNearWater(part8.js)の4箇所にほぼ同じ計算が重複していたのを1つの純関数に切り出したもの。
+// 呼び出し側の判定ロジック(しきい値・度外視条件)自体は変えない。
+function distSqPointToSeg(px, pz, x1, z1, x2, z2) {
+  const dx = x2 - x1, dz = z2 - z1, len2 = dx * dx + dz * dz;
+  let t = len2 > 0 ? ((px - x1) * dx + (pz - z1) * dz) / len2 : 0;
+  t = t < 0 ? 0 : t > 1 ? 1 : t;
+  const nx = x1 + dx * t - px, nz = z1 + dz * t - pz;
+  return nx * nx + nz * nz;
+}
 // 点(x,z)が、道路の中心線から (道幅/2 + extra) 以内にあるか(近傍セルだけ調べる)
 function roadNear(x, z, extra) {
   const gx = Math.floor(x / ROAD_CELL), gz = Math.floor(z / ROAD_CELL);
@@ -641,12 +652,9 @@ function roadNear(x, z, extra) {
     const arr = roadGrid.get((gx + dx) + ',' + (gz + dz));
     if (!arr) continue;
     for (const r of arr) {
-      const ax = r.x2 - r.x1, az = r.z2 - r.z1, len2 = ax * ax + az * az;
-      let tt = len2 > 0 ? ((x - r.x1) * ax + (z - r.z1) * az) / len2 : 0;
-      tt = tt < 0 ? 0 : tt > 1 ? 1 : tt;
-      const nx = r.x1 + ax * tt - x, nz = r.z1 + az * tt - z;
+      const d2 = distSqPointToSeg(x, z, r.x1, r.z1, r.x2, r.z2);
       const lim = (r.rw || 4) / 2 + extra;
-      if (nx * nx + nz * nz < lim * lim) return true;
+      if (d2 < lim * lim) return true;
     }
   }
   return false;

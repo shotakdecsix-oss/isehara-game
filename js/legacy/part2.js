@@ -843,11 +843,8 @@ function isOnRoad(cx, cz, bw, bd) {
     if (!arr) continue;
     for (const r of arr) {
       const rdx = r.x2-r.x1, rdz = r.z2-r.z1;
-      const len2 = rdx*rdx + rdz*rdz;
-      if (len2 < 0.01) continue;
-      const t = Math.max(0, Math.min(1, ((cx-r.x1)*rdx + (cz-r.z1)*rdz) / len2));
-      const nx = r.x1 + t*rdx - cx, nz = r.z1 + t*rdz - cz;
-      const dist = Math.sqrt(nx*nx + nz*nz);
+      if (rdx*rdx + rdz*rdz < 0.01) continue;
+      const dist = Math.sqrt(distSqPointToSeg(cx, cz, r.x1, r.z1, r.x2, r.z2));
       if (dist < (r.rw||5)/2 + halfDiag + 1) return true; // 1m margin
     }
   }
