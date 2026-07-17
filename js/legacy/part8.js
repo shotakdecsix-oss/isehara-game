@@ -345,7 +345,17 @@ function buildOSMBatchQuery(bboxes) {
 // ブラウザのIndexedDBに保存し、再訪・リロード時はネットワークを介さず即時復元する。
 // Overpassへのリクエスト数自体が減るので、未キャッシュタイルの取得も速くなる好循環。
 // クエリ内容(OSM_TILE_CLAUSES)を変えた時はVERをバンプして旧キャッシュを無効化すること。
-const OSM_TILE_CACHE_VER = 'v1';
+// 【2026-07-17・Fable5診断】致命的なキー設計バグを修正: 以前はキーが`tx,tz`(=浮動原点
+// からの相対タイル座標)のみだったため、ジャンプでrecenterOrigin(part4.js)が原点を
+// 付け替えるたびに「現在地タイル」のtx,tzが毎回0付近に戻り、以前訪れた全く別の都市の
+// タイルと衝突していた(例: 香港訪問時に`v1:0,0`で保存 → 後日NYへジャンプ →
+// NYの現在地タイルも`0,0`になり香港のデータがヒット → 中身のlat/lonは絶対座標なので
+// 変換結果は現在地から遠く離れた場所になり、近傍には何も生成されない。しかもタイルは
+// roadReadyTiles入り=取得成功扱いになるため再取得されず、建物生成ゲートだけ外れて
+// 水面回避データの無い手続き生成物(木など)が配置される「水上の木」の実体)。
+// キーをタイル座標ではなく絶対緯度経度のbbox文字列(下のbboxes[i])に変えることで
+// 都市をまたいだ衝突自体を無くす。VERもv2へ上げ、汚染済みの旧キャッシュを一括無効化する。
+const OSM_TILE_CACHE_VER = 'v2';
 const OSM_TILE_CACHE_TTL = 30 * 86400e3; // 30日(OSM編集の反映が最大30日遅れるのは許容)
 let _osmDBPromise = null;
 function osmCacheDB() {
@@ -494,7 +504,10 @@ async function fetchOSMTileBatch() {
   try {
     // 1枚クエリはまずIndexedDBキャッシュを照会(ヒットなら即時復元・ネットワーク不要)
     if (batch.length === 1) {
-      const cached = await osmCacheGet(keys[0]);
+      // 【2026-07-17・Fable5診断】キーはkeys[0](tx,tz=浮動原点からの相対座標)ではなく
+      // bboxes[0](絶対緯度経度)を使う。原点はジャンプごとに付け替わるため、相対座標を
+      // キーにすると別都市のタイルと衝突していた(詳細はOSM_TILE_CACHE_VER宣言部参照)。
+      const cached = await osmCacheGet(bboxes[0]);
       if (cached) {
         processTileData(cached, 1);
         osmTileFailCount.delete(keys[0]);
@@ -547,7 +560,7 @@ async function fetchOSMTileBatch() {
     if (!Number.isFinite(declared)) throw new Error('incomplete: count element missing');
     if (received < declared) throw new Error(`incomplete: ${received}/${declared} elements`);
     // count検証を通過した完全な1タイル応答だけをIndexedDBへ保存(部分応答の汚染を防ぐ)
-    if (batch.length === 1) osmCachePut(keys[0], data);
+    if (batch.length === 1) osmCachePut(bboxes[0], data); // 保存キーもbboxes[0](絶対座標)に統一
     // 複数タイル分の要素が1つの配列で混ざって届くが、seenOSMWaysでway ID重複排除される
     // ので、1タイルの時と同じ processTileData にそのまま渡してよい。密度計算用にタイル枚数も渡す。
     processTileData(data, batch.length);
