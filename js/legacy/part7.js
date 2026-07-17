@@ -324,7 +324,7 @@ function drawMinimap() {
   const R = MM_RANGE + 60; // 表示範囲外の要素は描画コマンド自体を発行しない
 
   // 実形状の水面ポリゴン(道路より下層に描く)
-  // 【重要】以前はminimapWaterPolys/minimapRoads(取得済み全件。増え続けて減らない)を
+  // 【重要】以前はminimapWaterPolys/roadRecords(取得済み全件。増え続けて減らない)を
   // 毎回全件走査していた。drawMinimapは間引いても約20fpsで呼ばれ続けるため、
   // 探索が進むほど1フレームあたりのコストが際限なく悪化していた
   // (長時間プレイでの重量化の主因の一つ)。空間ハッシュで表示範囲の近傍だけ拾う。

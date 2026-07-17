@@ -51,13 +51,13 @@ const FAR_Y = -0.15;                  // メッシュ全体のyオフセット
 
 // 格子ノード(i,j)の高さ(メッシュ頂点とクエリの両方がこの1つの関数を使う)。
 // NEAR(プレイヤー追従の高解像度グリッド)があればそれを、無ければWIDE(広域低解像度)を、
-// どちらも無ければ0mを返す(getWideTerrainY内のsampleGridが既にこの優先順位で処理する)。
+// どちらも無ければ0mを返す(terrainY内のsampleGridが既にこの優先順位で処理する)。
 function farNodeY(i, j) {
-  // getWideTerrainY はpart6.jsで定義される。このファイル(part5.js)の末尾で行う
+  // terrainY はpart6.jsで定義される。このファイル(part5.js)の末尾で行う
   // 起動直後の初期化呼び出し(updateFarMesh(true))はpart6.js読み込み前に実行されるため、
   // 未定義の間は0m(平坦)を返す(ReferenceError回避。typeofは未宣言識別子でも例外を投げない)。
-  if (typeof getWideTerrainY !== 'function') return 0;
-  return getWideTerrainY(i * FAR_STEP, j * FAR_STEP) || 0;
+  if (typeof terrainY !== 'function') return 0;
+  return terrainY(i * FAR_STEP, j * FAR_STEP) || 0;
 }
 
 // 描画されるメッシュ表面と厳密に一致する高さ(三角形分割もPlaneGeometryと同一)

@@ -15,7 +15,7 @@
 //            取得点数が少ない(約9バッチ)ので初回・再取得とも短時間で確実に終わる。
 //   ② NEAR = プレイヤーの周囲(±4km)を比較的高い解像度(約300〜400m間隔)で覆う。
 //            範囲が狭いので取得点数も少なく、頻繁に取り直しても軽い。
-// 実際の高さ問い合わせ(getWideTerrainY)は、まずNEARの範囲内ならNEARを、範囲外ならFARを返す。
+// 実際の高さ問い合わせ(terrainY)は、まずNEARの範囲内ならNEARを、範囲外ならFARを返す。
 //
 // 【opentopodata公開APIの実際の上限(公式ポリシーで確認済み)】
 //   1リクエスト/秒・1リクエスト最大100地点、かつ「1日あたり最大1000コール」というハード上限がある。
@@ -91,7 +91,7 @@ function sampleGrid(elev, cx, cz, w, d, segs, segs1, x, z, inRangeOnly) {
   return h00*(1-fx)*(1-fz) + h10*fx*(1-fz) + h01*(1-fx)*fz + h11*fx*fz;
 }
 
-function getWideTerrainY(x, z) {
+function terrainY(x, z) {
   // まずプレイヤー追従の高解像度NEARグリッドの範囲内かを見る(範囲外ならnull)
   const near = sampleGrid(nearElev, nearCX, nearCZ, NEAR_W, NEAR_D, NEAR_SEGS, NEAR_SEGS1, x, z, true);
   if (near !== null) return near;
@@ -157,7 +157,7 @@ async function loadWideTerrain(centerX = 0, centerZ = 0) {
 // 消えない)トーストを出し直すため、実際には失敗を繰り返しているだけなのに画面には
 // ずっと「地形を取得中...」が張り付いて見える(=「読み込みが進まない」ように見える)
 // 不具合になっていた。NEARのonNearTerrainFailと同じく、一定回数失敗したら諦めて
-// 自動再試行を止め、その旨を一度だけ明示するトーストに切り替える(遠景は既にgetWideTerrainYが
+// 自動再試行を止め、その旨を一度だけ明示するトーストに切り替える(遠景は既にterrainYが
 // wideElev未取得時0m扱いにフォールバックするので、諦めても遠景が平坦になるだけで実害はない)。
 let _wideFailCount = 0;
 let _wideGiveUp = false;
@@ -355,15 +355,15 @@ function setupSeaSlider() {
 // jumpToLatLon(part7.js)の遠距離ジャンプと同じ理由(float32精度によるちらつき対策)で
 // 原点を付け替える。ここはページの再読み込み直後(フレッシュな実行環境)なので、
 // jumpToLatLonのように「保存してリロード」する必要はなく、その場で付け替えるだけでよい。
-// fetchedOSMTiles/loadedOSMTilesは旧原点基準のタイル座標系で登録されているため、
+// queuedTiles/roadReadyTilesは旧原点基準のタイル座標系で登録されているため、
 // 付け替えたら必ずclearする(でなければ新しい地域なのに「タイル取得済み」と誤判定されて
 // 何も新しく読み込まれない。jumpToLatLonの遠距離ジャンプで実機確認済みの不具合と同じ原因)。
 function recenterForResumeIfFar(lat, lon) {
   const dist = Math.hypot((lon - MID_LON) * SCALE * COS_LAT, (lat - MID_LAT) * SCALE);
   if (dist > RECENTER_DIST_M) {
     recenterOrigin(lat, lon);
-    fetchedOSMTiles.clear();
-    loadedOSMTiles.clear();
+    queuedTiles.clear();
+    roadReadyTiles.clear();
     return true;
   }
   return false;

@@ -465,7 +465,7 @@ function addBuilding(x, z, w, d, h, style, isReal, rot) {
   // 裏付けに使う。農地の農道グリッドを住宅街と誤認する対策)
   const brec = { x, z, w, d, h: _origH, style, gy, parts, cbox, ck: currentChunkKey, bid, real: !!isReal, rot: rot || 0 };
   buildingRecords.push(brec);
-  buildingGridAdd(brec);
+  meshedBuildingGridAdd(brec);
 }
 
 // ======= 現実モード: リアル道路・線路・高速高架 =======

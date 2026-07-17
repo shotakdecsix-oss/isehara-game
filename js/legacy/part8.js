@@ -13,8 +13,8 @@
 // 「1リクエストでカバーする面積を広げる」こと。1600mへ拡大し、同じ範囲を埋めるのに
 // 必要なリクエスト数自体を減らす(面積比で1100m時の約2.1倍/リクエストをカバー)。
 const OSM_TILE_M = 1600;
-const fetchedOSMTiles = new Set();   // キュー投入済み(取得中 or 取得完了)のタイル
-const loadedOSMTiles = new Set();    // 実際に処理が完了した(道路が確定した)タイル。
+const queuedTiles = new Set();   // キュー投入済み(取得中 or 取得完了)のタイル
+const roadReadyTiles = new Set();    // 実際に処理が完了した(道路が確定した)タイル。
                                       // 「地形→道路→建物→木」の順を守るため、チャンクの
                                       // 建物生成はこれで判定してカバー範囲のタイルを待つ。
 const osmTileQueue = [];
@@ -232,7 +232,7 @@ function processTileData(data, tileCount) {
     // キューに積んだ時点(=OSMデータとして存在が確定した時点)で先にbuildingGridへ軽量登録
     // しておくことで、実際の描画完了を待たずに手続き生成側が正しく「ここは本物の建物がある」
     // と認識できるようにする。
-    knownBuildingGridAdd(realRec);
+    realBuildingIndexAdd(realRec);
   });
   // このバッチで新規に積んだ建物だけ、プレイヤー位置を中心とした近い順へ並べ替える
   // (part1.js sortNewEntriesByDistanceToPlayer参照)。
@@ -402,7 +402,7 @@ async function fetchOSMTileBatch() {
   // 応答インフラ側で504 Gateway Timeoutになることを確認(内部の[timeout:N]指定より手前の
   // リバースプロキシ側の上限に当たっている)。一方、同じ場所を1タイル単体でクエリすると
   // 1秒程度で正常に返る。以前は「6タイルまとめ→失敗→同じ6タイルまとめで再試行」を
-  // 繰り返し、4回失敗すると諦めてloadedOSMTiles扱いにしてしまい、実データが永久に
+  // 繰り返し、4回失敗すると諦めてroadReadyTiles扱いにしてしまい、実データが永久に
   // 手に入らないまま(=建物もlanduseも無いので手続き生成の充填条件も満たせず)空き地が
   // 残っていた。
   // 【重要・2026-07-16追記】「失敗履歴が1回でもあれば1枚まで縮小」という対策を入れたが、
@@ -422,7 +422,7 @@ async function fetchOSMTileBatch() {
   // 1枚クエリはIndexedDBキャッシュの対象にもなる(キャッシュはタイル単位のため)。
   // 外周のタイルは従来どおり3枚まとめでリクエスト数を抑える。
   const nearSolo = nextTile && Math.max(Math.abs(nextTile.tx + 0.5 - ptx), Math.abs(nextTile.tz + 0.5 - ptz)) <= 1.6;
-  const batchSize = (!loadedOSMTiles.has(ptKey) || nextFailCount >= 2 || nearSolo) ? 1 : OSM_TILE_BATCH;
+  const batchSize = (!roadReadyTiles.has(ptKey) || nextFailCount >= 2 || nearSolo) ? 1 : OSM_TILE_BATCH;
   const batch = osmTileQueue.splice(0, batchSize); // 近い順
   const keys = batch.map(({tx, tz}) => `${tx},${tz}`);
   const bboxes = batch.map(({tx, tz}) => {
@@ -469,7 +469,7 @@ async function fetchOSMTileBatch() {
       if (cached) {
         processTileData(cached, 1);
         osmTileFailCount.delete(keys[0]);
-        loadedOSMTiles.add(keys[0]);
+        roadReadyTiles.add(keys[0]);
         if (awaitingDestinationLoad && keys.includes(ptKey)) {
           awaitingDestinationLoad = false;
           showToast('✨ マップを表示しました', { duration: 3000 });
@@ -502,7 +502,7 @@ async function fetchOSMTileBatch() {
     // 部分結果」を返すことがある。以前はdata.elementsさえ存在すれば無条件で成功扱いにして
     // いたため、超高密度エリア(京橋・八重洲など)で道路は途中まで集計できても建物の集計に
     // 到達する前にOverpass側がタイムアウトし、その中途半端な結果を「完全に取得できた」
-    // ものとしてタイルを永久にloadedOSMTiles入りさせてしまい、実建物が二度と現れない
+    // ものとしてタイルを永久にroadReadyTiles入りさせてしまい、実建物が二度と現れない
     // 空地が生まれていた(実機診断で確認)。remarkにtimeout/memoryを示す文言があれば
     // 部分結果とみなし、失敗として扱って再試行キューに戻す。
     if (data.remark && /timed out|timeout|out of memory/i.test(data.remark)) {
@@ -524,7 +524,7 @@ async function fetchOSMTileBatch() {
     processTileData(data, batch.length);
     keys.forEach(k => {
       osmTileFailCount.delete(k);
-      loadedOSMTiles.add(k); // このタイルの道路が確定 → 建物生成待ちのチャンクを解放してよい
+      roadReadyTiles.add(k); // このタイルの道路が確定 → 建物生成待ちのチャンクを解放してよい
     });
     // loadOSM()(part6.js)は起動直後に「🗺 マップを読み込み中...」のstickyトーストを
     // 出したまま抜ける(道路・建物の実際の生成はここが担当するため)。プレイヤーの現在地
@@ -543,12 +543,12 @@ async function fetchOSMTileBatch() {
     keys.forEach(k => {
       const n = (osmTileFailCount.get(k) || 0) + 1;
       osmTileFailCount.set(k, n);
-      if (n >= 4) loadedOSMTiles.add(k); // これ以上は建物生成をブロックしない(道路は背景で取得を続ける)
-      fetchedOSMTiles.delete(k); // 常に再試行対象に戻す(checkOSMTiles が再度キューに積む)
+      if (n >= 4) roadReadyTiles.add(k); // これ以上は建物生成をブロックしない(道路は背景で取得を続ける)
+      queuedTiles.delete(k); // 常に再試行対象に戻す(checkOSMTiles が再度キューに積む)
     });
     // 現在地タイルが4回失敗して「諦めて先に進む」扱いになった場合も、sticky状態のトーストを
     // 出しっぱなしにしない(Overpass不調が長引くと「🗺 マップを読み込み中...」が永久に残るため)。
-    if (awaitingDestinationLoad && loadedOSMTiles.has(ptKey)) {
+    if (awaitingDestinationLoad && roadReadyTiles.has(ptKey)) {
       awaitingDestinationLoad = false;
       showToast('⚠️ 地図取得が一部失敗しました(背景で再試行を続けます)', { duration: 4000 });
     }
@@ -565,7 +565,7 @@ async function fetchOSMTileBatch() {
 }
 
 // 【2026-07-16】現在地タイルの「描写完了」監視。約1.5秒ごとに、(1)現在地タイルの
-// 道路データ確定(loadedOSMTiles)、(2)現在地タイル内の道路メッシュ待ち、(3)現在地タイル内の
+// 道路データ確定(roadReadyTiles)、(2)現在地タイル内の道路メッシュ待ち、(3)現在地タイル内の
 // 建物生成待ち、をチェックし、どれかが残っていれば_curTileRushを立てる。part9の生成ループが
 // これを見て、初期ラッシュと同じ拡大予算(建物400棟/14ms・道路優先の絞り緩和)で最優先処理する。
 // 順序自体は既存のゲート(地形→道路確定→建物のosmTilesReadyAround等)がタイル内でも守る。
@@ -577,7 +577,7 @@ function checkCurrentTileRush() {
   if (_curTileRushFrame % 90 !== 0) return;
   const T = OSM_TILE_M;
   const tx = Math.floor(player.position.x / T), tz = Math.floor(player.position.z / T);
-  let rush = !loadedOSMTiles.has(tx + ',' + tz);
+  let rush = !roadReadyTiles.has(tx + ',' + tz);
   if (!rush) {
     for (const r of pendingRoadMeshes) {
       if (Math.floor((r.x1 + r.x2) / 2 / T) === tx && Math.floor((r.z1 + r.z2) / 2 / T) === tz) { rush = true; break; }
@@ -613,7 +613,7 @@ function checkOSMTiles() {
   const queueTile = (wx, wz) => {
     const tx = Math.floor(wx / OSM_TILE_M), tz = Math.floor(wz / OSM_TILE_M);
     const key = `${tx},${tz}`;
-    if (!fetchedOSMTiles.has(key)) { fetchedOSMTiles.add(key); osmTileQueue.push({ tx, tz }); }
+    if (!queuedTiles.has(key)) { queuedTiles.add(key); osmTileQueue.push({ tx, tz }); }
   };
   // 【2026-07-16】7x7(49タイル)→5x5(25タイル)に縮小。ジャンプ直後の初期バックログが
   // 半減し、近傍タイルの取得完了(=プレイ可能になるまでの体感待ち)が大幅に早くなる。
@@ -695,7 +695,7 @@ function generateChunk(chunkX, chunkZ) {
   // 単純な1本道の延長(山道など)を住宅街と誤認しないよう、道の向き(180°を4分割)も見て、
   // 実際に格子状(=複数方向の道が交差)になっている場合だけ密集地とみなす。
   const dirBuckets = new Set();
-  // 【重要】以前はminimapRoads(取得済み全道路。増え続けて減らない)を毎回全件走査していた。
+  // 【重要】以前はroadRecords(取得済み全道路。増え続けて減らない)を毎回全件走査していた。
   // チャンク生成のたびに走る頻出パスなので空間ハッシュで近傍だけ拾う。
   for (const r of queryRoadGrid(x0 - 40, x1 + 40, z0 - 40, z1 + 40)) {
     if (r.type !== 'road' && r.type !== 'tertiary') continue;
@@ -1114,7 +1114,7 @@ function updateChunks() {
 
 // このチャンクの範囲を覆うOSMタイルが全て「道路確定済み」かどうか。
 // (地形→道路→建物→木の順を守るためのゲート。以前はチャンクの建物生成が
-//  minimapRoads にその時点で乗っている道路だけを見て進んでしまい、後から
+//  roadRecords にその時点で乗っている道路だけを見て進んでしまい、後から
 //  非同期でタイルの道路データが届くと、既に建てた建物に道路が遮られていた)
 // 指定点の周囲pad(m)がかかる全OSMタイルの道路が確定済みか。
 // 【2026-07-16】「地形→道路・線路→建物」の順序をタイル境界でも守るための共通ゲート。
@@ -1127,7 +1127,7 @@ function osmTilesReadyAround(x, z, pad) {
   const t0x = Math.floor((x - pad) / OSM_TILE_M), t1x = Math.floor((x + pad) / OSM_TILE_M);
   const t0z = Math.floor((z - pad) / OSM_TILE_M), t1z = Math.floor((z + pad) / OSM_TILE_M);
   for (let tx = t0x; tx <= t1x; tx++) for (let tz = t0z; tz <= t1z; tz++) {
-    if (!loadedOSMTiles.has(`${tx},${tz}`)) return false;
+    if (!roadReadyTiles.has(`${tx},${tz}`)) return false;
   }
   return true;
 }
