@@ -564,9 +564,10 @@ const ROAD_UNLOAD_DIST = PERF.roadUnload;
 const MINOR_ROAD_MESH_DIST = PERF.minorRoadDist;
 const isMinorRoadType = (t) => t === 'road' || t === 'tertiary';
 let _roadUnloadFrame = 0;
-function unloadFarRoads() {
+// force=true: 90フレーム周期を待たず即座に判定する(「今すぐ整理」ボタン用)
+function unloadFarRoads(force) {
   _roadUnloadFrame++;
-  if (_roadUnloadFrame % 90 !== 0) return; // 建物と同様、毎フレームやる必要はない(~1.5秒ごと)
+  if (!force && _roadUnloadFrame % 90 !== 0) return; // 建物と同様、毎フレームやる必要はない(~1.5秒ごと)
   const px = player.position.x, pz = player.position.z;
   const d2 = ROAD_UNLOAD_DIST * ROAD_UNLOAD_DIST;
   const dMinor2 = MINOR_ROAD_MESH_DIST * MINOR_ROAD_MESH_DIST;
@@ -736,9 +737,10 @@ const BUILDING_UNLOAD_DIST_REAL = PERF.bUnloadReal;
 const BUILDING_GEN_DIST_PROC = 1000;
 const BUILDING_UNLOAD_DIST_PROC = 1800;
 let _buildingUnloadFrame = 0;
-function unloadFarBuildings() {
+// force=true: 90フレーム周期を待たず即座に判定する(「今すぐ整理」ボタン用。CODE_REVIEW P8関連)
+function unloadFarBuildings(force) {
   _buildingUnloadFrame++;
-  if (_buildingUnloadFrame % 90 !== 0) return; // 毎フレームやる必要はない(~1.5秒ごと)
+  if (!force && _buildingUnloadFrame % 90 !== 0) return; // 毎フレームやる必要はない(~1.5秒ごと)
   if (buildingRecords.length === 0) return;
   const px = player.position.x, pz = player.position.z;
   // 【2026-07-16】総数上限(PERF.bMax)付近では、実建物の消去距離をヒステリシス上限

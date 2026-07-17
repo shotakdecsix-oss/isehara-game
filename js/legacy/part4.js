@@ -403,6 +403,7 @@ const campusGroundMat = (() => {
 const areaPolyMeshes = [];
 const areaPolyGrid = new Map(); // polyGridAdd/queryPolyGridで使う空間ハッシュ(全件走査を避ける)
 function rebuildAreaPolyMesh(entry) {
+  if (!entry.mesh) return; // 遠方でGPU解放済み(unloadFarAreaPolys参照)。再接近時に自然と再構築される
   const pos = entry.mesh.geometry.attributes.position;
   for (let i = 0; i < pos.count; i++) {
     const x = pos.getX(i), z = pos.getZ(i); // Y(高さ)だけ書き換えるのでX/Zはそのまま読める
@@ -423,30 +424,75 @@ function rebuildAreaPolysInBounds(x0, x1, z0, z1) {
   }
 }
 
-function buildAreaPoly(pts, mat, yOff, holes) {
-  const shape = new THREE.Shape();
-  shape.moveTo(pts[0].x, pts[0].z);
-  for (let i = 1; i < pts.length; i++) shape.lineTo(pts[i].x, pts[i].z);
-  if (holes) for (const hp of holes) {
-    if (hp.length < 4) continue;
-    const hpath = new THREE.Path();
-    hpath.moveTo(hp[0].x, hp[0].z);
-    for (let i = 1; i < hp.length; i++) hpath.lineTo(hp[i].x, hp[i].z);
-    shape.holes.push(hpath);
+// entry.kindごとのジオメトリ構築だけを担う純粋な部分。entry.mesh===null(初回 or 遠方解放後)を
+// entry.mesh=new THREE.Mesh(...)で埋める。scene.addまで行う(呼び出し元では触らない)。
+// 【2026-07-17】unloadFarAreaPolysの再構築でも使う共有ロジックとして、buildAreaPoly/
+// buildTerrainFollowingAreaPolyの本体からentry生成後に呼ぶ形に切り出した。
+function _instantiateAreaPolyMesh(entry) {
+  let geo;
+  if (entry.kind === 'flat') {
+    const shape = new THREE.Shape();
+    shape.moveTo(entry.pts[0].x, entry.pts[0].z);
+    for (let i = 1; i < entry.pts.length; i++) shape.lineTo(entry.pts[i].x, entry.pts[i].z);
+    if (entry.holes) for (const hp of entry.holes) {
+      if (hp.length < 4) continue;
+      const hpath = new THREE.Path();
+      hpath.moveTo(hp[0].x, hp[0].z);
+      for (let i = 1; i < hp.length; i++) hpath.lineTo(hp[i].x, hp[i].z);
+      shape.holes.push(hpath);
+    }
+    geo = new THREE.ShapeGeometry(shape);
+    const pos = geo.attributes.position;
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i), z = pos.getY(i); // ShapeのXY平面 → XZ平面へ
+      pos.setXYZ(i, x, getGroundY(x, z) + entry.yOff, z);
+    }
+    geo.computeVertexNormals();
+  } else { // 'terrain'(buildTerrainFollowingAreaPoly)
+    const { minX, maxX, minZ, maxZ, pts, yOff, cellSize, worldUV } = entry;
+    const nx = Math.max(1, Math.min(80, Math.ceil((maxX - minX) / cellSize)));
+    const nz = Math.max(1, Math.min(80, Math.ceil((maxZ - minZ) / cellSize)));
+    const verts = [], uvs = [], idx = [];
+    const grid = [];
+    for (let j = 0; j <= nz; j++) {
+      const row = [];
+      for (let i = 0; i <= nx; i++) {
+        const x = minX + (maxX - minX) * i / nx;
+        const z = minZ + (maxZ - minZ) * j / nz;
+        if (!pointInPolygon(x, z, pts)) { row.push(-1); continue; }
+        row.push(verts.length / 3);
+        verts.push(x, getGroundY(x, z) + yOff, z);
+        uvs.push(worldUV ? x : i / nx, worldUV ? z : j / nz);
+      }
+      grid.push(row);
+    }
+    for (let j = 0; j < nz; j++) for (let i = 0; i < nx; i++) {
+      const a = grid[j][i], b = grid[j][i + 1], c = grid[j + 1][i + 1], d = grid[j + 1][i];
+      if (a < 0 || b < 0 || c < 0 || d < 0) continue; // 境界セル(ポリゴン外の頂点を含む)は張らない
+      idx.push(a, b, c, a, c, d);
+    }
+    if (idx.length === 0) return false; // 細すぎる/境界だけのポリゴンはフォールバックなしで諦める
+    geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+    geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+    geo.setIndex(idx);
+    geo.computeVertexNormals();
   }
-  const geo = new THREE.ShapeGeometry(shape);
-  const pos = geo.attributes.position;
-  for (let i = 0; i < pos.count; i++) {
-    const x = pos.getX(i), z = pos.getY(i); // ShapeのXY平面 → XZ平面へ
-    pos.setXYZ(i, x, getGroundY(x, z) + yOff, z);
-  }
-  geo.computeVertexNormals();
-  const mesh = new THREE.Mesh(geo, mat);
+  const mesh = new THREE.Mesh(geo, entry.mat);
   mesh.renderOrder = 1;
   scene.add(mesh);
+  entry.mesh = mesh;
+  return true;
+}
+
+function buildAreaPoly(pts, mat, yOff, holes) {
   let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
   for (const p of pts) { minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minZ = Math.min(minZ, p.z); maxZ = Math.max(maxZ, p.z); }
-  const entry = { mesh, yOff, minX, maxX, minZ, maxZ };
+  // kind/pts/holes/matを保持しておくのは、遠方でGPU解放した後に再接近時、記録から
+  // 再構築できるようにするため(道路のrebuildRoadMesh/unloadFarRoadsと同じ考え方。
+  // CODE_REVIEW_20260717 P8: 以前はここで一度作ったら二度と解放されなかった)。
+  const entry = { mesh: null, kind: 'flat', pts, holes, mat, yOff, minX, maxX, minZ, maxZ };
+  _instantiateAreaPolyMesh(entry);
   areaPolyMeshes.push(entry);
   polyGridAdd(areaPolyGrid, entry);
 }
@@ -461,39 +507,43 @@ function buildAreaPoly(pts, mat, yOff, holes) {
 function buildTerrainFollowingAreaPoly(pts, mat, yOff, cellSize, worldUV) {
   let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
   pts.forEach(p => { minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minZ = Math.min(minZ, p.z); maxZ = Math.max(maxZ, p.z); });
-  const nx = Math.max(1, Math.min(80, Math.ceil((maxX - minX) / cellSize)));
-  const nz = Math.max(1, Math.min(80, Math.ceil((maxZ - minZ) / cellSize)));
-  const verts = [], uvs = [], idx = [];
-  const grid = [];
-  for (let j = 0; j <= nz; j++) {
-    const row = [];
-    for (let i = 0; i <= nx; i++) {
-      const x = minX + (maxX - minX) * i / nx;
-      const z = minZ + (maxZ - minZ) * j / nz;
-      if (!pointInPolygon(x, z, pts)) { row.push(-1); continue; }
-      row.push(verts.length / 3);
-      verts.push(x, getGroundY(x, z) + yOff, z);
-      uvs.push(worldUV ? x : i / nx, worldUV ? z : j / nz);
-    }
-    grid.push(row);
-  }
-  for (let j = 0; j < nz; j++) for (let i = 0; i < nx; i++) {
-    const a = grid[j][i], b = grid[j][i + 1], c = grid[j + 1][i + 1], d = grid[j + 1][i];
-    if (a < 0 || b < 0 || c < 0 || d < 0) continue; // 境界セル(ポリゴン外の頂点を含む)は張らない
-    idx.push(a, b, c, a, c, d);
-  }
-  if (idx.length === 0) return; // 細すぎる/境界だけのポリゴンはフォールバックなしで諦める
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
-  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
-  geo.setIndex(idx);
-  geo.computeVertexNormals();
-  const mesh = new THREE.Mesh(geo, mat);
-  mesh.renderOrder = 1;
-  scene.add(mesh);
-  const entry = { mesh, yOff, minX, maxX, minZ, maxZ };
+  const entry = { mesh: null, kind: 'terrain', pts, mat, yOff, cellSize, worldUV, minX, maxX, minZ, maxZ };
+  if (!_instantiateAreaPolyMesh(entry)) return; // 細すぎる/境界だけのポリゴンはフォールバックなしで諦める
   areaPolyMeshes.push(entry);
   polyGridAdd(areaPolyGrid, entry);
+}
+
+// ======= 面メッシュの距離ベースGPU解放・再構築 =======
+// 【2026-07-17・CODE_REVIEW_20260717 P8】道路(unloadFarRoads/rebuildRoadMesh)と同じ考え方で、
+// 公園・水面・田畑・キャンパスの面メッシュも遠方はGPUメッシュだけ解放し、再接近時にentryの
+// pts/holes/matから再構築する。avoidPolygons/landusePolygons/minimapWaterPolys(THREE.js
+// オブジェクトを持たない軽量な記録)やareaPolyGridへの登録自体は変えない — entry.meshの
+// null⇔Meshの切り替えのみ(道路のr.meshと同じパターン)。
+const AREA_POLY_UNLOAD_DIST = PERF.roadUnload; // 道路と同程度の距離まで保持
+let _areaPolyUnloadFrame = 0;
+// force=true: 90フレーム周期を待たず即座に判定する(「今すぐ整理」ボタン用)
+function unloadFarAreaPolys(force) {
+  _areaPolyUnloadFrame++;
+  if (!force && _areaPolyUnloadFrame % 90 !== 0) return; // 道路・建物と同様、~1.5秒ごとで十分
+  if (areaPolyMeshes.length === 0) return;
+  const px = player.position.x, pz = player.position.z;
+  const d2 = AREA_POLY_UNLOAD_DIST * AREA_POLY_UNLOAD_DIST;
+  for (const entry of areaPolyMeshes) {
+    // bboxへの最短距離(プレイヤーがbbox内なら0)。巨大な公園・大河川の中にいるのに
+    // 「中心が遠い」という理由で解放されてしまわないようにする。
+    const nx = Math.max(entry.minX, Math.min(px, entry.maxX));
+    const nz = Math.max(entry.minZ, Math.min(pz, entry.maxZ));
+    const dx = px - nx, dz = pz - nz;
+    const dd = dx * dx + dz * dz;
+    if (!entry.mesh) {
+      if (dd <= d2) _instantiateAreaPolyMesh(entry); // 再接近 → 記録から再構築
+      continue;
+    }
+    if (dd <= d2) continue; // まだ範囲内
+    scene.remove(entry.mesh);
+    entry.mesh.geometry.dispose(); // マテリアルは共有(lawnMat等)なので破棄しない
+    entry.mesh = null;
+  }
 }
 
 function scatterTreesIn(poly, sqmPerTree, cap) {

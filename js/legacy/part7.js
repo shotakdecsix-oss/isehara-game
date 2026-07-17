@@ -506,7 +506,9 @@ const PERF_LABELS = { lite: '軽量', std: '標準', high: '高品質' };
 if (perfBtn && perfCtrlEl) {
   const sub = document.getElementById('perfSub');
   if (sub) sub.textContent = PERF_LABELS[PERF_PRESET] || '標準';
-  perfCtrlEl.querySelectorAll('.charRow button').forEach((b) => {
+  // 【2026-07-17】data-preset付きボタンだけに限定(下の「今すぐ整理」ボタンは
+  // 同じ.charRow内だがpreset切替ではないため、誤ってリロード処理に巻き込まれないように)。
+  perfCtrlEl.querySelectorAll('.charRow button[data-preset]').forEach((b) => {
     b.classList.toggle('active', b.dataset.preset === PERF_PRESET);
     b.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -525,6 +527,26 @@ if (perfBtn && perfCtrlEl) {
     e.stopPropagation();
     perfCtrlEl.classList.toggle('open');
     perfBtn.classList.toggle('active', perfCtrlEl.classList.contains('open'));
+  });
+}
+
+// ======= 「今すぐ整理」ボタン =======
+// 【2026-07-17】長時間プレイでの重量化対策。unloadFarBuildings/unloadFarRoads/
+// unloadFarAreaPolysは通常90フレーム(~1.5秒)ごとに自動で走るが、遠方のGPUメッシュを
+// 今すぐまとめて解放したい(=手動でリフレッシュしたい)場合のための即時実行ボタン。
+// 記録データ(buildingRecords/roadRecords/areaPolyMeshesのentry)自体は消さないので、
+// 現在地周辺は見た目上まったく変わらず、再接近時は従来どおり記録から自動で復元される。
+const cleanupNowBtn = document.getElementById('cleanupNowBtn');
+if (cleanupNowBtn) {
+  cleanupNowBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const before = renderer.info.memory.geometries;
+    unloadFarBuildings(true);
+    unloadFarRoads(true);
+    unloadFarAreaPolys(true);
+    osmTileFailCount.clear(); // タイル再試行カウンタ(距離に関係ないブックキーピング)もリセット
+    const after = renderer.info.memory.geometries;
+    showToast(`🧹 現在地周辺以外を整理しました(ジオメトリ ${before} → ${after})`);
   });
 }
 

@@ -378,6 +378,9 @@ function animate() {
   //  建物総数キャップ(PERF.bMax)+細街路メッシュ距離制限で達成済み)
   // 道路・線路も同様に、遠方のものはGPUメッシュだけ解放する(記録データは残す)
   unloadFarRoads();
+  // 公園・水面・田畑・キャンパスの面メッシュも同じ方式(遠方GPU解放/再接近で再構築)。
+  // 【2026-07-17】以前はこれだけ一度作ったら二度と解放されなかった(CODE_REVIEW_20260717 P8)。
+  unloadFarAreaPolys();
   // Tile-based OSM fetch — loads roads/buildings for newly entered areas
   checkOSMTiles();
   // 遠景標高グリッドをプレイヤーに追従(遠くへジャンプしても実地形・標高が出る)
