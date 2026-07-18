@@ -835,9 +835,20 @@ function generateChunk(chunkX, chunkZ) {
   //     周辺の道路が格子状+近くに実建物があるというチャンク単位の状況証拠(denseArea)
   //     を根拠に補完してよいことにする。工場・商業・農地・山林・公園・水域は1)2)で
   //     既に弾かれているので、ここが誤って工場等に効くことはない。
+  // 【2026-07-18】傾斜地には手続き生成の家を建てない(丘陵地で家が斜面に埋まる/浮いて
+  // 見える見た目対策)。候補点からSLOPE_CHECK_DIST(m)離れた2点との高低差で勾配を概算する。
+  // getGroundYはELEV_SCALE(=2.0、part5.js)で誇張された高さを返すため、しきい値はその
+  // 前提での経験値(実勾配おおよそ14%相当を目安)。実OSM建物には適用しない(実データ優先)。
+  const SLOPE_CHECK_DIST = 8, SLOPE_MAX_DH = 2.2;
+  const isSteepSlope = (qx, qz) => {
+    const h0 = getGroundY(qx, qz);
+    return Math.abs(getGroundY(qx + SLOPE_CHECK_DIST, qz) - h0) > SLOPE_MAX_DH ||
+           Math.abs(getGroundY(qx, qz + SLOPE_CHECK_DIST) - h0) > SLOPE_MAX_DH;
+  };
   const buildable = (qx, qz) => {
     if (isInsideKnownRealBuilding(qx, qz)) return false;
     if (inAvoid(qx, qz)) return false;
+    if (isSteepSlope(qx, qz)) return false;
     const lu = luTypeAt(qx, qz);
     if (lu && NON_HOUSE_LU.has(lu)) return false;
     if (lu === 'residential') return true;
@@ -913,6 +924,7 @@ function generateChunk(chunkX, chunkZ) {
         // フットプリント内に手続き生成の建物が重なって生成されるのを防げない
         // (東京駅周辺での住宅密集バグの主因の一つ。[[project_isehara_game_procedural_infill_race]])。
         if (isInsideKnownRealBuilding(jx, jz)) continue;
+        if (isSteepSlope(jx, jz)) continue; // 【2026-07-18】傾斜地には建てない(buildable()参照)
         const bw = 7+Math.random()*5;
         const bd = 6.5+Math.random()*4.5;
         if (isOnRoad(jx, jz, bw, bd)) continue;
