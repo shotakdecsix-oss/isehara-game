@@ -46,7 +46,10 @@ function classifyResidential(style, w, d, h, x, z) {
 // 学校・病院・役場・神社仏閣は街の目印として際立つべきだが、OSMに高さ/階数タグが
 // 無いと既存のランダム式(3〜11m程度)で低く埋もれてしまう。種別が判明しているものだけ
 // 最低高さを底上げする(タグの実測値がある場合はresolveBuildingHeightの値を尊重=縮めない)。
-const LANDMARK_MIN_H = { school: 7, hospital: 9, government: 8, shrine: 6, temple: 7 };
+const LANDMARK_MIN_H = { school: 7, hospital: 9, government: 8, shrine: 6, temple: 7, stadium: 16 };
+// ドーム球場は開放型スタジアム(上のLANDMARK_MIN_H=16m)よりずっと背が高い(東京ドーム等は
+// 実測50m超)。stadiumDome判定時だけ、これを下回らないよう別途底上げする(part8.js参照)。
+const STADIUM_DOME_MIN_H = 45;
 function applyLandmarkMinHeight(style, h) {
   if (!style) return h;
   const min = LANDMARK_MIN_H[style.type];
@@ -227,7 +230,8 @@ function addBuilding(x, z, w, d, h, style, isReal, rot) {
 
   // ---- ファサード種別(手続きテクスチャ。神社仏閣・教会・キノコは従来の無地) ----
   kind =
-    (isMushroom || type === 'shrine' || type === 'temple' || type === 'church') ? null :
+    // 【2026-07-18】スタジアムはオフィス街のような窓タイル張りだと不自然なので無地壁にする
+    (isMushroom || type === 'shrine' || type === 'temple' || type === 'church' || type === 'stadium') ? null :
     type === 'industrial' ? 'ind' :
     (floors <= 2 && (type === 'house' || type === 'default' || type === 'shop')) ? 'house' :
     (type === 'house' || type === 'apartment') ? 'apt' : 'office';
@@ -360,6 +364,17 @@ function addBuilding(x, z, w, d, h, style, isReal, rot) {
     pitched(HIP_GEO, Math.max(1.4, minWD * 0.22), 1.6, rm); // 幅広の寄棟
   } else if (rtype === 'government') {
     dm(UNIT_DOME, rm, x, gy + h, z, minWD * 0.8, minWD * 0.8, minWD * 0.8); // Dome
+  } else if (rtype === 'stadium') {
+    // 【2026-07-18】野球場・サッカー場・競技場の再現度向上。
+    // ドーム球場: フットプリント全体を覆う大きな半球ドーム(_spaceモードと同じ手法)。
+    // 開放型スタジアム: 山型の屋根ではなく、幅いっぱいの陸屋根+パラペットで
+    // 「低く幅広いスタジアムのお椀型」のシルエットに近づける(hospitalと同じ手法を流用)。
+    if (style && style.stadiumDome) {
+      const domeR = Math.sqrt(w * w + d * d) / 2 * 1.05;
+      dm(UNIT_DOME, rm, x, gy + h * 0.3, z, domeR, domeR * 0.9, domeR);
+    } else {
+      dm(PARAPET_GEO, rm, x, gy + h, z, w + 1.2, 1.6, d + 1.2);
+    }
   } else {
     // 一般建物(現実モード)
     // OSMのroof:shapeタグがあれば形状はそれを優先(flat/gabled/hipped/pyramidal/skillion等)。

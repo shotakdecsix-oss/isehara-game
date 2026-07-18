@@ -212,6 +212,11 @@ function processTileData(data, tileCount) {
     if (style && style.landmark && LANDMARK_TOWER_HEIGHT[style.landmark] != null) {
       h = LANDMARK_TOWER_HEIGHT[style.landmark];
     }
+    // 【2026-07-18】ドーム球場はLANDMARK_MIN_H(開放型スタジアム共通の16m)よりずっと高い
+    // (東京ドーム等は実測50m超)。実測タグがそれより高ければそちらを尊重するのでMaxで底上げ。
+    if (style && style.type === 'stadium' && style.stadiumDome) {
+      h = Math.max(h, STADIUM_DOME_MIN_H);
+    }
     style = classifyResidential(style, w, d, h, cx, cz);
     let fw = w, fd = d, fh = h;
     ({ w: fw, d: fd, h: fh } = applySizeFloor(style, w, d, h)); // マンション・工場は最低サイズを底上げ

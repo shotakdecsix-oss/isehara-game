@@ -396,6 +396,71 @@ const campusGroundMat = (() => {
   return new THREE.MeshLambertMaterial({ map: tex, side: THREE.DoubleSide });
 })();
 
+// 【2026-07-18】スポーツ施設(野球場・サッカー場・陸上競技場)の再現度向上。
+// campusGroundMat(校庭の陸上トラック描画)と同じ「canvasテクスチャを1枚焼いて
+// buildTerrainFollowingAreaPolyの外接矩形UVに載せる」手法を使う。leisure=pitch
+// (sportタグでサッカー/野球を判定)とleisure=trackを対象に、種目ごとの見た目を割り当てる。
+const pitchSoccerMat = (() => {
+  const c = document.createElement('canvas'); c.width = 256; c.height = 384;
+  const g = c.getContext('2d'); const W = c.width, H = c.height;
+  g.fillStyle = '#2f8f47'; g.fillRect(0, 0, W, H); // 芝(公園の芝より濃い緑にして区別)
+  g.strokeStyle = 'rgba(255,255,255,0.9)'; g.lineWidth = 3;
+  const m = 14; // 外周ライン
+  g.strokeRect(m, m, W - m * 2, H - m * 2);
+  g.beginPath(); g.moveTo(m, H / 2); g.lineTo(W - m, H / 2); g.stroke(); // ハーフウェイライン
+  g.beginPath(); g.arc(W / 2, H / 2, Math.min(W, H) * 0.13, 0, Math.PI * 2); g.stroke(); // センターサークル
+  // ゴールエリア(上下)
+  g.strokeRect(W / 2 - W * 0.22, m, W * 0.44, H * 0.09);
+  g.strokeRect(W / 2 - W * 0.22, H - m - H * 0.09, W * 0.44, H * 0.09);
+  return new THREE.MeshLambertMaterial({ map: new THREE.CanvasTexture(c), side: THREE.DoubleSide });
+})();
+const pitchBaseballMat = (() => {
+  const c = document.createElement('canvas'); c.width = 384; c.height = 384;
+  const g = c.getContext('2d'); const W = c.width, H = c.height;
+  g.fillStyle = '#3a9d4f'; g.fillRect(0, 0, W, H); // 外野芝
+  // 内野(土色の扇形)。ホームベースを左下角付近に置き、ライト方向へ扇形に広げる簡略化表現。
+  const hx = W * 0.18, hy = H * 0.82, R = Math.min(W, H) * 0.62;
+  g.fillStyle = '#c8a26a';
+  g.beginPath(); g.moveTo(hx, hy); g.arc(hx, hy, R, -Math.PI / 2 - 0.05, 0 + 0.05, false); g.closePath(); g.fill();
+  // ベースライン(白線、ダイヤモンド)
+  const d = R * 0.42;
+  g.strokeStyle = 'rgba(255,255,255,0.9)'; g.lineWidth = 3;
+  g.beginPath();
+  g.moveTo(hx, hy); g.lineTo(hx + d, hy - d); g.lineTo(hx + d * 2, hy); g.lineTo(hx + d, hy + d); g.closePath();
+  g.stroke();
+  return new THREE.MeshLambertMaterial({ map: new THREE.CanvasTexture(c), side: THREE.DoubleSide });
+})();
+// 多目的・その他スポーツ(テニス・バスケ等): 公園の芝と紛れないよう少し彩度を上げた緑の無地
+const pitchGenericMat = new THREE.MeshLambertMaterial({ color: 0x389a53, side: THREE.DoubleSide });
+// 陸上競技場(leisure=track、学校敷地とは別に単独施設として存在するもの)。
+// campusGroundMatの白線トラック(土台)と違い、トラック面自体を赤茶色の帯で表現する。
+const trackMat = (() => {
+  const c = document.createElement('canvas'); c.width = 512; c.height = 384;
+  const g = c.getContext('2d'); const W = c.width, H = c.height;
+  g.fillStyle = '#3a9d4f'; g.fillRect(0, 0, W, H); // フィールド(芝)
+  const cx = W / 2, cy = H / 2, rx = W * 0.42, ry = H * 0.36, straight = Math.max(0.1, rx - ry);
+  const stadiumPath = (rr) => {
+    g.beginPath();
+    g.moveTo(cx - straight, cy - rr);
+    g.lineTo(cx + straight, cy - rr);
+    g.arc(cx + straight, cy, rr, -Math.PI / 2, Math.PI / 2, false);
+    g.lineTo(cx - straight, cy + rr);
+    g.arc(cx - straight, cy, rr, Math.PI / 2, -Math.PI / 2, false);
+    g.closePath();
+  };
+  g.fillStyle = '#b5502a'; // トラック面(赤茶)。外周から内周をくり抜いて帯状にする
+  stadiumPath(ry); g.fill('evenodd');
+  stadiumPath(ry * 0.72); g.globalCompositeOperation = 'destination-out'; g.fill(); g.globalCompositeOperation = 'source-over';
+  g.strokeStyle = 'rgba(255,255,255,0.7)'; g.lineWidth = 1.5;
+  for (let lane = 1; lane < 7; lane++) { stadiumPath(ry - lane * (ry * 0.28 / 7)); g.stroke(); }
+  return new THREE.MeshLambertMaterial({ map: new THREE.CanvasTexture(c), side: THREE.DoubleSide });
+})();
+function pitchMatFor(sport) {
+  if (sport === 'soccer' || sport === 'football') return pitchSoccerMat;
+  if (sport === 'baseball' || sport === 'softball') return pitchBaseballMat;
+  return pitchGenericMat;
+}
+
 // ポリゴンから地形に沿った面メッシュを1枚生成(三角形分割はShapeGeometry=earcut)
 // holes: 内周リング(中州など)の配列(省略可)
 // 水域・公園・田畑ポリゴンのメッシュ一覧。NEAR高解像度地形が更新されたとき、
@@ -683,7 +748,11 @@ function handleAreaFeature(el) {
   const isForest = lu === 'forest' || tags.natural === 'wood';
   // 学校・大学・病院の敷地全体(構内に手続き生成の家を建てさせないための回避ゾーン)
   const isCampus = ['school','university','college','hospital'].includes(tags.amenity || '');
-  if (!isPark && !isWater && !isFarm && !isForest && !isCampus) return false;
+  // 【2026-07-18】野球場・サッカー場等の競技用地(leisure=pitch)と陸上競技場(leisure=track)。
+  // 種目ごとの見た目はpitchMatFor(sport)/trackMatで割り当てる(定義は上のセクション参照)。
+  const isPitch = tags.leisure === 'pitch';
+  const isTrack = tags.leisure === 'track';
+  if (!isPark && !isWater && !isFarm && !isForest && !isCampus && !isPitch && !isTrack) return false;
   const pts = el.geometry.map(g => latLonToXZ(g.lat, g.lon));
   let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
   pts.forEach(p => { minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minZ = Math.min(minZ, p.z); maxZ = Math.max(maxZ, p.z); });
@@ -723,6 +792,10 @@ function handleAreaFeature(el) {
     scatterTreesIn(poly, 380, 70);
   } else if (isCampus) {
     if (span < 900 && areaPolyBudgetOK('campus')) buildTerrainFollowingAreaPoly(pts, campusGroundMat, 0.13, 25, false);
+  } else if (isPitch) {
+    if (span < 250 && areaPolyBudgetOK('park')) buildTerrainFollowingAreaPoly(pts, pitchMatFor(tags.sport), 0.14, 16, false);
+  } else if (isTrack) {
+    if (span < 500 && areaPolyBudgetOK('park')) buildTerrainFollowingAreaPoly(pts, trackMat, 0.14, 20, false);
   }
   return true;
 }

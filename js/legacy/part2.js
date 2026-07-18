@@ -901,6 +901,12 @@ function getBuildingStyle(tags) {
     style = { color: 0xf8f8f8, roofColor: 0xdddddd, emissive: 0x111111, type: 'hospital' };
   } else if (am === 'townhall' || am === 'police' || am === 'fire_station' || name.includes('市役所') || name.includes('役場')) {
     style = { color: 0x6070a0, roofColor: 0x405080, emissive: 0x001133, type: 'government' };
+  } else if (tags.leisure === 'stadium' || bt === 'stadium' || bt === 'grandstand') {
+    // 【2026-07-18】野球場・サッカー場・競技場の再現度向上。コンクリート系の落ち着いた色に
+    // 統一し(オフィス街のガラス張り色と紛れないよう寒色は避ける)、屋根形状(part3.js)側で
+    // ドーム球場か開放型スタジアムかを見た目に反映する。名前かroof:shape=domeでドーム判定。
+    const stadiumDome = tags['roof:shape'] === 'dome' || /ドーム|[Dd]ome/.test(name + (tags['name:en'] || ''));
+    style = { color: 0xb0b4bc, roofColor: 0x888ea0, emissive: 0x08080c, type: 'stadium', stadiumDome };
   } else if (tags.shop || am === 'supermarket' || am === 'convenience') {
     // 実際の店構え(コンビニ・商店等)。街灯り演出(のれん/看板バンド等)はこの'shop'型限定。
     style = { color: 0xff8840, roofColor: 0xcc5500, emissive: 0x221100, type: 'shop' };
