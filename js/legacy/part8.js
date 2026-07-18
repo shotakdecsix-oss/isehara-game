@@ -1194,27 +1194,36 @@ function chunkNearTerrainReady(chunkX, chunkZ) {
 }
 
 // 1フレームに1チャンクだけ生成するフレーム分割処理
+// 【2026-07-18】以前は先頭を1個shiftし、未準備(タイル未取得等)なら末尾へpushして
+// そのフレームは何もせず終わる方式だった。これだと「最も近い=キュー先頭のチャンク」が
+// タイル取得待ちで詰まっている間、キューの後ろの方にある「既に準備完了の遠いチャンク」が
+// 同じフレームで一度も試されず、実質的にキュー全体が近い順→到着順にシャッフルされて
+// いくため、「遠景は生成されるのに近辺だけ生成が大きく遅れる」体感の一因になっていた
+// (密集地でOverpassの応答が遅れがちな近傍タイルほどこの詰まりの影響を受けやすい)。
+// 1フレーム1チャンク生成という制約(カクつき防止)は変えず、範囲外チャンクを間引きつつ
+// キューを先頭(=近い)から走査して「今すぐ生成できる最初の1件」を探す方式に変更する。
 function processChunkQueue() {
   if (chunkGenQueue.length === 0) return;
-  const c = chunkGenQueue.shift();
   const ccx = Math.floor(player.position.x / CHUNK_SIZE);
   const ccz = Math.floor(player.position.z / CHUNK_SIZE);
-  // キュー待ちの間に遠ざかったチャンクは破棄(再訪時に再キューされる)
-  if (Math.abs(c.x - ccx) > CHUNK_RADIUS + 1 || Math.abs(c.z - ccz) > CHUNK_RADIUS + 1) {
-    loadedChunks.delete(c.key);
+  for (let i = 0; i < chunkGenQueue.length; i++) {
+    const c = chunkGenQueue[i];
+    // キュー待ちの間に遠ざかったチャンクは破棄(再訪時に再キューされる)
+    if (Math.abs(c.x - ccx) > CHUNK_RADIUS + 1 || Math.abs(c.z - ccz) > CHUNK_RADIUS + 1) {
+      chunkGenQueue.splice(i, 1);
+      loadedChunks.delete(c.key);
+      i--;
+      continue;
+    }
+    // カバーするタイルの道路データがまだ届いていなければ、このチャンクは飛ばして
+    // 次(=より遠いが準備完了かもしれないチャンク)を見る。この行がキューに残ったまま
+    // 進むのが今回の修正の核心(以前はここでpushして関数を抜けていた)。
+    if (!chunkTilesReady(c.x, c.z)) continue;
+    // NEAR(周辺高解像度)地形がまだこのチャンクを覆っていなければ同様に飛ばす
+    // (明治モードはNEARを使わないので対象外)
+    if (!IS_MEIJI && !chunkNearTerrainReady(c.x, c.z)) continue;
+    chunkGenQueue.splice(i, 1);
+    generateChunk(c.x, c.z);
     return;
   }
-  // カバーするタイルの道路データがまだ届いていなければ、建物を生成せず後回しにする
-  // (キュー末尾へ回し、他の準備済みチャンクを先に処理する)
-  if (!chunkTilesReady(c.x, c.z)) {
-    chunkGenQueue.push(c);
-    return;
-  }
-  // NEAR(周辺高解像度)地形がまだこのチャンクを覆っていなければ、建物が変な高さで
-  // 焼き込まれないよう後回しにする(明治モードはNEARを使わないので対象外)
-  if (!IS_MEIJI && !chunkNearTerrainReady(c.x, c.z)) {
-    chunkGenQueue.push(c);
-    return;
-  }
-  generateChunk(c.x, c.z);
 }
