@@ -444,23 +444,47 @@ window.addEventListener('resize', () => {
   // モード切替リロード(江戸↔現実など)や遠方ジャンプ後の再開では切替/ジャンプ前の位置に戻す。
   // その時は現在地ジャンプしないし、これから行う伊勢原の初期地形取得も無駄になる(後述)。
   let isModeSwitch = false;
-  try { isModeSwitch = !!localStorage.getItem('iseharaResumePos'); } catch (e) {}
+  // 【2026-07-18】遠方ジャンプ(300km超)による再開かどうかを、破壊読み(consumeResumePos)
+  // する前に先読みしておく。理由は下のloadNearTerrain(0,0)呼び分けを参照。
+  let resumeFarJump = false;
+  try {
+    const s = localStorage.getItem('iseharaResumePos');
+    if (s) {
+      isModeSwitch = true;
+      const p = JSON.parse(s);
+      if (typeof p.lat === 'number' && typeof p.lon === 'number') {
+        const d = Math.hypot((p.lon - MID_LON) * SCALE * COS_LAT, (p.lat - MID_LAT) * SCALE);
+        resumeFarJump = d > RECENTER_DIST_M; // jumpToLatLon/recenterForResumeIfFarと同じ式・同じ閾値
+      }
+    }
+  } catch (e) {}
   // 【重要】OSMデータの実際の取得・生成はもうここでは行わない — loadOSM()(part6.js)は
   // プレイヤーの初期位置決定と国コードの早期取得だけを行い、道路・建物はpart8.jsの
   // タイル取得システム(checkOSMTiles)がinitialWorldLoaded=true後に周辺タイルとして
   // 取りに行く(伊勢原も他地域と同じ経路)。そのため地形取得と並行するfetchOSMData()の
   // 事前投げは不要になった。
-  // 伊勢原本体(原点)のNEAR地形を先に取得しておく。isModeSwitchがtrueでも省略できない —
-  // 「モード切替(江戸↔現実など)による再開」と「遠方ジャンプによる再開」はどちらも同じ
-  // iseharaResumePosを使うため、この時点(loadOSM呼び出し前)ではまだ区別できない。
-  await loadNearTerrain(0, 0);
+  // 伊勢原本体(原点)のNEAR地形を先に取得しておく。モード切替(江戸↔現実など、伊勢原に
+  // 留まったままの再開)ではisModeSwitchがtrueでも省略できない — この時点ではまだ
+  // 「モード切替」と「遠方ジャンプ」を区別できないため。
+  // 【2026-07-18】ただし遠方ジャンプ(resumeFarJump)だけは先読みで区別できるようになった。
+  // 遠方ジャンプの場合、原点はどのみちこの直後のloadOSM()内でジャンプ先へ付け替わる
+  // (recenterForResumeIfFar)ため、ここで伊勢原原点(0,0)のNEAR地形を取りに行くのは
+  // 丸ごと無駄になる(標高APIの往復時間ぶん「マップを読み込み中」が無駄に延びていた)。
+  if (!resumeFarJump) await loadNearTerrain(0, 0);
   if (USES_MEIJI_LANDUSE) await loadMeijiLanduse();
   // モード切替/遠方ジャンプの再開時は、loadOSM()内部で再開先へ原点を付け替え(recenterOrigin)、
   // regionBaseReadyがfalseに戻るため、下のloadNearTerrainで新しい地域の高度基準が確定し直される。
   await loadOSM();
-  // 通常起動のみ初期位置へ移動(現在地、取れなければ東京駅)。
-  const loc = await startLocP;
-  if (!isModeSwitch) jumpToLatLon(loc.lat, loc.lon);
+  // 【2026-07-18】以前はisModeSwitchでも無条件でstartLocP(位置情報, 最大8秒)をawaitして
+  // いたが、isModeSwitch時はその結果(loc)を使わない(下のjumpToLatLonを呼ばない)ため、
+  // ここでの待ちは完全に無駄だった。建物生成はNEAR地形到達待ちのゲート(chunkNearTerrainReady)
+  // があるため、この無駄な待ちがジャンプ先へのNEAR/WIDE地形取得の開始を遅らせ、
+  // 「マップを読み込み中」の間ずっと建物が生成されない体感を悪化させていた。
+  // 通常起動(isModeSwitchでない)時だけ位置情報を待って初期位置へ移動する。
+  if (!isModeSwitch) {
+    const loc = await startLocP;
+    jumpToLatLon(loc.lat, loc.lon);
+  }
   // 最終的なプレイヤー位置を中心に、NEAR(周辺・高解像度)とFAR(広域・低解像度)を両方取得
   loadNearTerrain(player.position.x, player.position.z);
   loadWideTerrain(player.position.x, player.position.z);
