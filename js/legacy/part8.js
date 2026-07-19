@@ -410,13 +410,24 @@ async function fetchOSMTileBatch() {
   // プレイヤーに近いタイルを優先(以前はキュー投入順で、進行方向の
   // タイルが後回しになり目の前で道路が途切れたまま待たされていた)
   const ptx = player.position.x / OSM_TILE_M, ptz = player.position.z / OSM_TILE_M;
+  // 【2026-07-19】osmTilesReadyAround(part8.js)が建物生成のブロックに使う「現在地から
+  // 64m以内にかかる全タイル」の集合。プレイヤーがタイル境界(角)近くに立つと、自タイルの
+  // 建物ですらこの中の隣接1〜3タイルの到着待ちになる。他の近傍タイルと同列の優先度だと、
+  // たまたま取得順が悪い時に「中心タイルは道路のみで建物が出ない・別方向は完全描写」という
+  // 非対称な詰まりが実機で確認された。この集合に入るタイルは常に最優先で取得する。
+  const _blockPad = 64;
+  const _bx0 = Math.floor((player.position.x - _blockPad) / OSM_TILE_M), _bx1 = Math.floor((player.position.x + _blockPad) / OSM_TILE_M);
+  const _bz0 = Math.floor((player.position.z - _blockPad) / OSM_TILE_M), _bz1 = Math.floor((player.position.z + _blockPad) / OSM_TILE_M);
+  const _blockingTiles = new Set();
+  for (let tx = _bx0; tx <= _bx1; tx++) for (let tz = _bz0; tz <= _bz1; tz++) _blockingTiles.add(tx + ',' + tz);
   // 【2026-07-16】距離のみのソートだと真後ろと真正面のタイルが同順位になり、移動中に
   // 前方タイルが後回しになることがあった。進行方向(checkOSMTilesで更新される
   // _osmMoveUx/Uz)への射影ぶんスコアを引いて、同距離なら前方を必ず先に取得する。
   // 係数0.8: 前方1タイル先 ≒ 横0.8タイルぶん優先(後方タイルは射影が負なので不利になる)。
   const _tileScore = (t) => {
     const dx = t.tx + 0.5 - ptx, dz = t.tz + 0.5 - ptz;
-    return Math.abs(dx) + Math.abs(dz) - (dx * _osmMoveUx + dz * _osmMoveUz) * 0.8;
+    const base = Math.abs(dx) + Math.abs(dz) - (dx * _osmMoveUx + dz * _osmMoveUz) * 0.8;
+    return _blockingTiles.has(t.tx + ',' + t.tz) ? base - 1000 : base; // ブロック中タイルは他の近傍より必ず先
   };
   // 【2026-07-17・Fable5診断】距離だけでなく、backoff中(osmTileNextRetryAtが未来)の
   // タイルは近さに関係なく後ろへ回す。以前は「近い順」だけだったため、直近で失敗した
@@ -527,7 +538,12 @@ async function fetchOSMTileBatch() {
         processTileData(cached, 1);
         osmTileFailCount.delete(keys[0]);
         roadReadyTiles.add(keys[0]);
-        if (awaitingDestinationLoad && keys.includes(ptKey)) {
+        // 【2026-07-19】以前はkeys.includes(ptKey)=自タイル1枚が届いた時点で「表示しました」に
+        // 差し替えていたが、建物はosmTilesReadyAround(64m)で隣接タイルも待つため、トーストが
+        // 消えた後も建物だけしばらく生成されない「表示は完了なのに実際は空」の乖離があった
+        // (体感の悪化として報告された逆ドーナツ症状の一因)。建物が実際に生成可能になる条件と
+        // 揃え、隣接ブロックタイルも含めて揃ってから完了表示にする。
+        if (awaitingDestinationLoad && osmTilesReadyAround(player.position.x, player.position.z, 64)) {
           awaitingDestinationLoad = false;
           showToast('✨ マップを表示しました', { duration: 3000 });
         }
@@ -584,9 +600,10 @@ async function fetchOSMTileBatch() {
       roadReadyTiles.add(k); // このタイルの道路が確定 → 建物生成待ちのチャンクを解放してよい
     });
     // loadOSM()(part6.js)は起動直後に「🗺 マップを読み込み中...」のstickyトーストを
-    // 出したまま抜ける(道路・建物の実際の生成はここが担当するため)。プレイヤーの現在地
-    // タイルが届いた時点で、これを完了メッセージに差し替える。
-    if (awaitingDestinationLoad && keys.includes(ptKey)) {
+    // 出したまま抜ける(道路・建物の実際の生成はここが担当するため)。
+    // 【2026-07-19】完了表示は自タイルだけでなく、建物生成の実際のゲート
+    // (osmTilesReadyAround・上のキャッシュヒット分岐と同じ)が揃った時点に揃える。
+    if (awaitingDestinationLoad && osmTilesReadyAround(player.position.x, player.position.z, 64)) {
       awaitingDestinationLoad = false;
       showToast('✨ マップを表示しました', { duration: 3000 });
     }
