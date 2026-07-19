@@ -154,8 +154,15 @@ function updateDebugTileOverlay(force) {
     else if (pending > 0) status = 'buildingPending';
     else status = 'done';
     const cx = x0 + OSM_TILE_M / 2, cz = z0 + OSM_TILE_M / 2;
+    // 【2026-07-19】中心の地面高さだけだと起伏のあるタイルで平面が地形に埋まって見えるため、
+    // タイル内を3×3でサンプリングし一番高い点に合わせる(山がちなタイルでも埋まらない)。
+    let topY = -Infinity;
+    for (let sx = 0; sx <= 2; sx++) for (let sz = 0; sz <= 2; sz++) {
+      const gy = getGroundY(x0 + OSM_TILE_M * sx / 2, z0 + OSM_TILE_M * sz / 2);
+      if (gy > topY) topY = gy;
+    }
     const mesh = _debugTilePlane(key);
-    mesh.position.set(cx, getGroundY(cx, cz) + 0.6, cz);
+    mesh.position.set(cx, topY + 0.6, cz);
     mesh.material.color.setHex(DEBUG_TILE_COLORS[status]);
     mesh.visible = true;
     logRows.push({ tile: key, status, road: roadReady, terrain: terrainReady, buildDone: done, buildPending: pending, fails: osmTileFailCount.get(key) || 0 });

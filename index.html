@@ -104,6 +104,16 @@ body {
 }
 #charCtrl button.active { background:var(--accent); color:#fff; border-color:var(--accent); }
 
+/* デバッグ: タイル読み込み状況オーバーレイの色凡例(🩺ONの間だけ常時表示) */
+#debugTileLegend {
+  position:fixed; left:50%; top:calc(var(--safe-top) + 8px); transform:translateX(-50%);
+  border-radius:var(--hud-radius); padding:6px 12px; z-index:35;
+  font-size:11px; line-height:1.6; display:none; white-space:nowrap; pointer-events:none;
+}
+#debugTileLegend.show { display:block; }
+#debugTileLegend span { display:inline-block; width:9px; height:9px; border-radius:2px; margin:0 3px 0 8px; vertical-align:middle; }
+#debugTileLegend span:first-child { margin-left:0; }
+
 /* 描写・パフォーマンス設定ポップオーバー(⚙タップで開閉) */
 #perfCtrl {
   position:fixed; left:calc(var(--safe-left) + 58px); top:50%; transform:translateY(-50%);
@@ -312,6 +322,7 @@ body.uiHidden #uiToggleBtn { opacity:0.45; }
 </div>
 
 <div id="status" class="glass">🗺 伊勢原マップ読み込み中...</div>
+<div id="debugTileLegend" class="glass">🩺<span style="background:#555555"></span>未取得<span style="background:#dd3333"></span>取得中<span style="background:#3388dd"></span>地形待ち<span style="background:#ffaa22"></span>建物残<span style="background:#33cc55"></span>完了</div>
 <div id="minimap" class="glass"><canvas id="minimapCanvas" width="200" height="200"></canvas></div>
 <div id="joystick" class="glass"><div id="joystickKnob"></div></div>
 <button id="hopBtn" class="glass">⤴</button>

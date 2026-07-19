@@ -577,14 +577,13 @@ if (cleanupNowBtn) {
 // 【2026-07-19】実体(平面の生成・更新)はpart9.jsのsetDebugTileOverlay/updateDebugTileOverlay。
 // ここではボタンの見た目(active状態)とトースト通知だけを担当する。
 const debugTileBtn = document.getElementById('debugTileBtn');
+const debugTileLegendEl = document.getElementById('debugTileLegend');
 if (debugTileBtn) {
   debugTileBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     setDebugTileOverlay(!debugTileOverlayOn);
     debugTileBtn.classList.toggle('active', debugTileOverlayOn);
-    showToast(debugTileOverlayOn
-      ? '🩺 タイル状況オーバーレイON(灰=未取得 赤=取得中 青=地形待ち 橙=建物残 緑=完了)'
-      : '🩺 タイル状況オーバーレイOFF');
+    if (debugTileLegendEl) debugTileLegendEl.classList.toggle('show', debugTileOverlayOn); // ON中は色凡例を常時表示
   });
 }
 
