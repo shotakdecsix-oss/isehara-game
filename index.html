@@ -264,7 +264,6 @@ body.uiHidden #uiToggleBtn { opacity:0.45; }
   <button class="railBtn glass hasSub" id="perfBtn" title="描写・パフォーマンス設定"><span class="ico">⚙</span><span class="sub" id="perfSub">標準</span></button>
   <button class="railBtn glass" id="charBtn" title="キャラクター選択">🧍</button>
   <button class="railBtn glass" id="camDirBtn" title="視点回転">🔄</button>
-  <button class="railBtn glass" id="debugTileBtn" title="デバッグ: タイル読み込み状況を可視化">🩺</button>
   <button class="railBtn glass" id="helpBtn" title="操作ヘルプ">?</button>
 </nav>
 
@@ -287,6 +286,10 @@ body.uiHidden #uiToggleBtn { opacity:0.45; }
     <button id="cleanupNowBtn">🧹 今すぐ整理</button>
   </div>
   <div id="perfDesc">現在地周辺以外の道路・建物・公園/水面等のGPUメッシュを解放します(記録は残るので再訪すれば元通り。長時間プレイで重くなってきたら押してください)</div>
+  <div class="charRow">
+    <button id="debugTileBtn">🩺 タイル状況</button>
+  </div>
+  <div id="perfDesc">デバッグ用: 周囲のOSMタイルごとの取得・生成状況を色分け表示します(灰=未取得 赤=取得中 青=地形待ち 橙=生成中 緑=完了)</div>
 </div>
 
 <!-- キャラクター選択ポップオーバー(🧍タップで開閉) -->
