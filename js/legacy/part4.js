@@ -57,14 +57,9 @@ function decorateRoad(x1, z1, x2, z2, type, w, rec) {
       poolAdd(lampP, sx - px * 1.2, gy + 5.6, sz - pz * 1.2, ry, 0.9, 0.9, 0.9,
               Math.random() < 0.6 ? 0x33ff66 : 0xff4433);
     }
-    // 青看板・標識
-    if (Math.random() < 0.12) {
-      const t = Math.random();
-      const sx = x1 + dx * t + px * (w / 2 + 0.7), sz = z1 + dz * t + pz * (w / 2 + 0.7);
-      const gy = getGroundY(sx, sz);
-      poolAdd(poleP, sx, gy + 1.8, sz, 0, 0.5, 0.45, 0.5);
-      poolAdd(signBoardP, sx, gy + 3.3, sz, ry);
-    }
+    // 【2026-07-18・ユーザー判断で撤去】青看板・標識(ポール+看板)。街並みに不要な
+    // 小物として撤去要望。signBoardPプール自体はpart2.jsに残しているが、poolAdd呼び出しを
+    // やめたので以降生成されない(既存プレイ中の分は該当チャンクの再生成/リロードで消える)。
   }
 }
 
@@ -789,7 +784,11 @@ function handleAreaFeature(el) {
   } else if (isFarm) {
     if (span >= 15 && span < 500 && areaPolyBudgetOK('farm')) buildTerrainFollowingAreaPoly(pts, farmMat, 0.1, 20, true);
   } else if (isForest) {
-    scatterTreesIn(poly, 380, 70);
+    // 【2026-07-19】以前は170(公園)より疎な380=1本1本のまばらな木に見えていた。
+    // 森は公園より密なはずなので公園より密度を上げ、上限もTREE_MAX(3500)に対し
+    // 十分小さい260に据え置き(1ポリゴンが木プールを独占しないための個別上限。
+    // [[feedback_per_building_decoration_budget]]と同じ理由=共有予算は個別に上限が要る)。
+    scatterTreesIn(poly, 130, 260);
   } else if (isCampus) {
     if (span < 900 && areaPolyBudgetOK('campus')) buildTerrainFollowingAreaPoly(pts, campusGroundMat, 0.13, 25, false);
   } else if (isPitch) {
