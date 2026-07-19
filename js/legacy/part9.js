@@ -81,6 +81,90 @@ function updateForest() {
   rebuildForest();
 }
 
+// ======= デバッグ: タイルごとの地形・道路/線路・建物 読み込み状況の可視化 =======
+// 【2026-07-19】ユーザーからのデバッグ要望。OSMタイル(OSM_TILE_M=1600m四方)単位で、
+// 地形(NEAR高解像度グリッドの被覆)・道路/線路(roadReadyTiles)・建物(残件数)の
+// 進捗を、プレイヤー周囲に半透明の色付き平面として3D世界に直接表示する。
+// index.html #debugTileBtn(🩺)でオン/オフ(part7.jsで配線)。オフ中は平面をvisible=false
+// にするだけで、集計処理自体を毎フレームスキップする(常時コストはほぼゼロ)。
+let debugTileOverlayOn = false;
+const debugTilePlanes = new Map(); // "tx,tz" → THREE.Mesh(平面は使い回し、破棄しない)
+let _debugTileFrame = 0;
+const DEBUG_TILE_COLORS = {
+  unqueued: 0x555555,       // まだ道路タイルすらリクエストしていない
+  fetching: 0xdd3333,       // リクエスト済みだが道路/線路が未確定(取得中・バックオフ中)
+  waitTerrain: 0x3388dd,    // 道路/線路は確定・地形(NEAR高解像度グリッド)が未確定
+  buildingPending: 0xffaa22,// 道路・地形は確定・このタイル分の建物がまだ残っている
+  done: 0x33cc55,           // このタイル分は道路・地形・既知の建物残件ともに揃っている
+};
+function _debugTilePlane(key) {
+  let m = debugTilePlanes.get(key);
+  if (!m) {
+    const geo = new THREE.PlaneGeometry(OSM_TILE_M * 0.92, OSM_TILE_M * 0.92);
+    const mat = new THREE.MeshBasicMaterial({
+      color: 0xffffff, transparent: true, opacity: 0.35,
+      depthWrite: false, side: THREE.DoubleSide, fog: false, // フォグで遠方が見えなくなるとデバッグにならないので無効化
+    });
+    m = new THREE.Mesh(geo, mat);
+    m.rotation.x = -Math.PI / 2;
+    m.renderOrder = 5;
+    m.visible = false;
+    scene.add(m);
+    debugTilePlanes.set(key, m);
+  }
+  return m;
+}
+function setDebugTileOverlay(on) {
+  debugTileOverlayOn = on;
+  if (!on) { for (const m of debugTilePlanes.values()) m.visible = false; }
+  else { _debugTileFrame = 0; updateDebugTileOverlay(true); }
+}
+function updateDebugTileOverlay(force) {
+  if (!debugTileOverlayOn) return;
+  _debugTileFrame++;
+  if (!force && _debugTileFrame % 30 !== 0) return; // ~0.5秒ごと(常時1フレームおきだと集計コストが無駄)
+  const ptx = Math.floor(player.position.x / OSM_TILE_M), ptz = Math.floor(player.position.z / OSM_TILE_M);
+  const R = PERF.prefetchR + 1; // 実際に先読みされている範囲+1(境界も見えるように)
+  // 建物の残件・完了件数をタイルごとに1回だけ集計(オーバーレイON時・0.5秒に1回のみなので負荷は軽微)
+  const tileKeyOf = (x, z) => Math.floor(x / OSM_TILE_M) + ',' + Math.floor(z / OSM_TILE_M);
+  const bump = (map, k) => map.set(k, (map.get(k) || 0) + 1);
+  const pendingByTile = new Map(), dormantByTile = new Map(), doneByTile = new Map();
+  for (let i = pendingBuildingIdx; i < pendingBuildings.length; i++) bump(pendingByTile, tileKeyOf(pendingBuildings[i].x, pendingBuildings[i].z));
+  for (const b of dormantBuildings) bump(dormantByTile, tileKeyOf(b.x, b.z));
+  for (const rec of buildingRecords) bump(doneByTile, tileKeyOf(rec.x, rec.z));
+  const seen = new Set();
+  const logRows = [];
+  for (let dx = -R; dx <= R; dx++) for (let dz = -R; dz <= R; dz++) {
+    const tx = ptx + dx, tz = ptz + dz;
+    const key = tx + ',' + tz;
+    seen.add(key);
+    const roadReady = roadReadyTiles.has(key);
+    const queued = queuedTiles.has(key);
+    const x0 = tx * OSM_TILE_M, x1 = x0 + OSM_TILE_M, z0 = tz * OSM_TILE_M, z1 = z0 + OSM_TILE_M;
+    // chunkNearTerrainReady(part8.js)と同じ判定をタイル全体の箱に対して行う
+    const terrainReady = _nearGiveUp || !!(nearElev &&
+      x0 > nearCX - NEAR_W / 2 + 10 && x1 < nearCX + NEAR_W / 2 - 10 &&
+      z0 > nearCZ - NEAR_D / 2 + 10 && z1 < nearCZ + NEAR_D / 2 - 10);
+    const pending = (pendingByTile.get(key) || 0) + (dormantByTile.get(key) || 0);
+    const done = doneByTile.get(key) || 0;
+    let status;
+    if (!queued) status = 'unqueued';
+    else if (!roadReady) status = 'fetching';
+    else if (!terrainReady) status = 'waitTerrain';
+    else if (pending > 0) status = 'buildingPending';
+    else status = 'done';
+    const cx = x0 + OSM_TILE_M / 2, cz = z0 + OSM_TILE_M / 2;
+    const mesh = _debugTilePlane(key);
+    mesh.position.set(cx, getGroundY(cx, cz) + 0.6, cz);
+    mesh.material.color.setHex(DEBUG_TILE_COLORS[status]);
+    mesh.visible = true;
+    logRows.push({ tile: key, status, road: roadReady, terrain: terrainReady, buildDone: done, buildPending: pending, fails: osmTileFailCount.get(key) || 0 });
+  }
+  // 範囲外に出た平面は隠すだけ(破棄しない。再度範囲に入ったらそのまま使い回す)
+  for (const [key, mesh] of debugTilePlanes) if (!seen.has(key)) mesh.visible = false;
+  if (force || _debugTileFrame % 120 === 0) console.table(logRows); // 詳細な数値は~2秒ごとにコンソールへ
+}
+
 // ======= ANIMATION LOOP =======
 const clock = new THREE.Clock();
 let walkCycle = 0;
@@ -394,6 +478,8 @@ function animate() {
 
   // 山の森(プレイヤー周囲だけ・移動で作り直し)
   updateForest();
+  // デバッグ: タイル読み込み状況オーバーレイ(オフ中は内部で即return、コストなし)
+  updateDebugTileOverlay();
 
   // 空・星・遠景地形をカメラ/プレイヤーに追従させる
   // (固定のままだと移動やマップジャンプで far クリップ外に出て「空が消える」)

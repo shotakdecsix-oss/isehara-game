@@ -573,6 +573,21 @@ if (cleanupNowBtn) {
   });
 }
 
+// ======= デバッグ: タイル読み込み状況オーバーレイ切替(🩺タップでオン/オフ) =======
+// 【2026-07-19】実体(平面の生成・更新)はpart9.jsのsetDebugTileOverlay/updateDebugTileOverlay。
+// ここではボタンの見た目(active状態)とトースト通知だけを担当する。
+const debugTileBtn = document.getElementById('debugTileBtn');
+if (debugTileBtn) {
+  debugTileBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    setDebugTileOverlay(!debugTileOverlayOn);
+    debugTileBtn.classList.toggle('active', debugTileOverlayOn);
+    showToast(debugTileOverlayOn
+      ? '🩺 タイル状況オーバーレイON(灰=未取得 赤=取得中 青=地形待ち 橙=建物残 緑=完了)'
+      : '🩺 タイル状況オーバーレイOFF');
+  });
+}
+
 // ======= キャラクター選択ポップオーバー(🧍タップで開閉、外側タップで閉じる) =======
 const charBtn = document.getElementById('charBtn');
 const charCtrlEl = document.getElementById('charCtrl');
