@@ -301,16 +301,33 @@ function facadeMat(kind, color, variant) {
   facadeCache.set(key, m);
   return m;
 }
-// 建物アンロード時に呼ぶ(part1.js unloadFarBuildings等)。facadeMat以外が返した材質
-// (roofSurfMat/lambertMat由来。userData.cacheKeyを持たない)には何もしない安全設計。
-// 参照カウントが0になったら実際にテクスチャごと破棄し、facadeCacheからも消す。
+// 【2026-07-20・別チャット分析(CODE_ANALYSIS_20260720)で発覚した二重解放バグの対策】
+// 手続き生成建物は buildingRecords[].parts と chunkMeshes[chunkKey] の両方に
+// 同じmeshオブジェクトが入る(part3.js buildingRecords.push / part8.js generateChunkの
+// scene.children.slice)。removeBuildingsOverlappingRoad(part1.js)が先に個別撤去しても
+// chunkMeshes側からは消えないため、後でチャンクごとアンロードされた時に同じmeshへ
+// もう一度releaseFacadeMatが呼ばれ、まだ表示中の共有材を誤ってdispose()してしまっていた。
+// 呼び出し元(part1.js 2箇所・part8.js 1箇所)でmesh.userData._releasedを見て多重実行自体を
+// 防いだ上で、ここでも「万一のすり抜け」に備えて負カウントを検出したら警告を出すだけで
+// disposeはしない(実機HUDで_facadeReleaseWarnCountが0のままなら修正が効いている証拠)。
+let _facadeReleaseWarnCount = 0;
 function releaseFacadeMat(mat) {
   if (!mat || !mat.userData || mat.userData.cacheKey == null) return;
+  if (mat.userData.refCount == null || mat.userData.refCount <= 0) {
+    _facadeReleaseWarnCount++;
+    console.warn('[facadeCache] releaseFacadeMat: 想定外の負カウント(二重解放の疑い)', mat.userData.cacheKey, _facadeReleaseWarnCount);
+    return;
+  }
   mat.userData.refCount--;
   if (mat.userData.refCount > 0) return;
   facadeCache.delete(mat.userData.cacheKey);
-  if (mat.map) mat.map.dispose();
-  if (mat.emissiveMap) mat.emissiveMap.dispose();
+  // 【2026-07-20・A(c)】iOS(WebKit)はCanvasのバッキングストアをGC任せで遅延解放するため、
+  // dispose()するこの瞬間だけ明示的にCanvasの中身を0x0にして即時返却させる。
+  // 【重要】ここはこのmaterial自体を実際に破棄する分岐(=refCount0到達時)でしか
+  // 実行されないので、facadeCacheに残っている他の生存中エントリ(=まだ表示中の建物が
+  // 使っている共有material)のCanvasには一切触れない。
+  if (mat.map) { if (mat.map.image) { mat.map.image.width = 0; mat.map.image.height = 0; } mat.map.dispose(); }
+  if (mat.emissiveMap) { if (mat.emissiveMap.image) { mat.emissiveMap.image.width = 0; mat.emissiveMap.image.height = 0; } mat.emissiveMap.dispose(); }
   mat.dispose();
 }
 

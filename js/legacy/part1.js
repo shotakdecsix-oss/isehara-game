@@ -362,7 +362,8 @@ function removeBuildingsOverlappingRoad(r) {
       }
       if (!overlap) continue;
       for (const p of rec.parts) {
-        if (!p) continue;
+        if (!p || p.userData._released) continue; // 【2026-07-20・二重解放バグ修正】下記コメント参照
+        p.userData._released = true;
         scene.remove(p);
         if (p.geometry && !p.geometry.userData.shared) p.geometry.dispose();
         if (p.material) releaseFacadeMat(p.material); // facadeMat以外は無害なno-op(part2.js参照)
@@ -821,7 +822,8 @@ function unloadFarBuildings(force) {
     if (rec.real && rec.h > 40) dd /= 2.56; // 高層は1.6倍遠くまで保持(ヒストグラムの換算と一致させる)
     if (dd <= (rec.real ? d2Real : d2Proc)) continue; // まだ範囲内
     for (const p of rec.parts) {
-      if (!p) continue;
+      if (!p || p.userData._released) continue; // 【2026-07-20・二重解放バグ修正】下記コメント参照
+      p.userData._released = true;
       scene.remove(p);
       if (p.geometry && !p.geometry.userData.shared) p.geometry.dispose();
       if (p.material) releaseFacadeMat(p.material); // facadeMat以外は無害なno-op(part2.js参照)

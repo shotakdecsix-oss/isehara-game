@@ -1260,6 +1260,8 @@ function updateChunks() {
     const [kcx, kcz] = key.split(',').map(Number);
     if (Math.abs(kcx - cx) > unloadR || Math.abs(kcz - cz) > unloadR) {
       meshes.forEach(m => {
+        if (!m || m.userData._released) return; // 【2026-07-20・二重解放バグ修正】下記コメント参照
+        m.userData._released = true;
         scene.remove(m);
         // 屋根・小物の単位ジオメトリは全建物で共有しているため破棄しない
         if (m.geometry && !m.geometry.userData.shared) m.geometry.dispose();
