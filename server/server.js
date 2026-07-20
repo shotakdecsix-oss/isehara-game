@@ -473,7 +473,13 @@ async function handleStatic(req, res) {
     return;
   }
 
-  res.writeHead(200, { 'Content-Type': mime });
+  // 【2026-07-20】js/legacy/*.js等の静的ファイルにCache-Controlが一切付いておらず、
+  // ブラウザのヒューリスティックキャッシュに任せきりだった。頻繁に修正・デプロイする
+  // 開発中のゲームでこれをやると、サーバー側は最新でもプレイヤーのブラウザが古いJSを
+  // キャッシュしたまま「直したはずのバグが直っていない」という報告が起き得る
+  // (index.htmlだけ既にno-cacheだったが、実体のロジックはjs/legacy側にあるため無意味だった)。
+  // index.htmlと同じくno-cacheにして、更新のたびブラウザに確実に反映させる。
+  res.writeHead(200, { 'Content-Type': mime, 'Cache-Control': 'no-cache' });
   res.end(data);
 }
 

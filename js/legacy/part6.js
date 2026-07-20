@@ -131,6 +131,14 @@ async function loadWideTerrain(centerX = 0, centerZ = 0) {
   wideLoading = false;
   _wideFailCount = 0; _wideGiveUp = false; // 成功したのでリセット
   updateFarMesh(true); // 遠景メッシュを新しい実地形で再構築
+  // 【2026-07-20】マップジャンプ直後、木が浮いて見える不具合の修正。道路・建物・駅・
+  // エリアポリゴンはNEAR/WIDE更新のたびにrebuild*InBoundsで地形へ追従させているが、
+  // 森の木(plantTree/rebuildForest)だけはこの追従から漏れていた。rebuildForestは
+  // プレイヤーが一定距離動くたびにも呼ばれる(updateForest)ため、実際には「移動すれば直る」
+  // ものの、それまでは古い(取得中/未取得だった時点の)地形高さのまま浮いた/埋まった木が
+  // 残っていた。地形データそのものが更新された今この瞬間に呼び直せば、移動を待たず
+  // 即座に正しい高さへ生え直す。
+  if (typeof rebuildForest === 'function') rebuildForest();
   if (reCenter) showToast('🏔 地形反映完了', { duration: 2500 });
 }
 
@@ -243,6 +251,9 @@ async function loadNearTerrain(centerX = 0, centerZ = 0) {
   rebuildBuildingsInBounds(centerX - NEAR_W/2, centerX + NEAR_W/2, centerZ - NEAR_D/2, centerZ + NEAR_D/2);
   // 駅舎も道路・建物と同じタイミングでY方向に追従させる(浮き対策)
   rebuildStationsInBounds(centerX - NEAR_W/2, centerX + NEAR_W/2, centerZ - NEAR_D/2, centerZ + NEAR_D/2);
+  // 【2026-07-20】森の木(plantTree/rebuildForest)も同じ理由でNEAR更新のたびに追従させる
+  // (詳細はloadWideTerrain側の同種コメント参照。マップジャンプ後に木が浮いて見える不具合対策)。
+  if (typeof rebuildForest === 'function') rebuildForest();
 }
 
 // プレイヤーがNEARグリッドの中心から離れたら取り直す。範囲を広げた(±4km)ぶん、
