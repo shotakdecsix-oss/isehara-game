@@ -662,17 +662,45 @@ const hopBtn = document.getElementById('hopBtn');
 // passive:false + preventDefault() で、長押し時にiOS/Androidのテキスト選択・コピー用
 // 吹き出し(callout)やマウス選択カーソルが出るのを止める。これが出るとtouchend/mouseupが
 // 途中で発火してhopHeldが意図せずfalseに戻り、上昇し続けられず上下動を繰り返していた。
-hopBtn.addEventListener('touchstart', e => { e.preventDefault(); hopHeld = true; }, { passive: false });
+hopBtn.addEventListener('touchstart', e => { e.preventDefault(); hopHeld = true; setAltLocked(false); }, { passive: false });
 hopBtn.addEventListener('touchend',   e => { e.preventDefault(); hopHeld = false; }, { passive: false });
 hopBtn.addEventListener('touchcancel',e => { e.preventDefault(); hopHeld = false; }, { passive: false });
-hopBtn.addEventListener('mousedown',  e => { e.preventDefault(); hopHeld = true; });
+hopBtn.addEventListener('mousedown',  e => { e.preventDefault(); hopHeld = true; setAltLocked(false); });
 hopBtn.addEventListener('mouseup',    () => { hopHeld = false; });
 hopBtn.addEventListener('mouseleave', () => { hopHeld = false; }); // 押したままボタン外へ出た場合も解除
 hopBtn.addEventListener('contextmenu', e => e.preventDefault()); // 長押しでの右クリックメニュー/コールアウトも抑止
 hopBtn.addEventListener('selectstart', e => e.preventDefault()); // 万一のテキスト選択開始も抑止
 // Space: 押している間上昇し続け、離すと落下する
-document.addEventListener('keydown', e => { if (e.key === ' ' && !e.repeat) hopHeld = true; });
+document.addEventListener('keydown', e => { if (e.key === ' ' && !e.repeat) { hopHeld = true; setAltLocked(false); } });
 document.addEventListener('keyup',   e => { if (e.key === ' ') hopHeld = false; });
+
+// ======= 高度キープ(ホバー)=======
+// 上昇ボタンで昇った高度をそのまま維持し、重力による自然落下を止める機能。
+// 【要望】「ジャンプ上昇のあとに高度をキープする機能・操作が欲しい。キープ解除も含めて。」
+// 地上にいる間ロックしても地形追従を止めるだけで意味が無い(斜面を歩くと埋まる/浮く)ため、
+// 空中(airborne)の時だけ有効化できるようにする。解除はボタン再押下・キー再押下に加え、
+// 上昇ボタン(hopBtn/Space)を押した瞬間にも自動解除する(「もっと昇りたい」を優先)。
+let altLocked = false;
+const altKeepBtn = document.getElementById('altKeepBtn');
+function updateAltKeepBtn() {
+  if (!altKeepBtn) return;
+  altKeepBtn.textContent = altLocked ? '🔒' : '🔓';
+  altKeepBtn.title = altLocked ? '高度キープ中(タップで解除)' : '高度キープ(空中でタップ)';
+  altKeepBtn.classList.toggle('active', altLocked);
+}
+function setAltLocked(v) {
+  if (v && !airborne) return; // 地上では無効(意味がないため無視)
+  if (altLocked === v) return;
+  altLocked = v;
+  if (altLocked) velY = 0; // ロックした瞬間の上下速度を止め、その高さで静止させる
+  updateAltKeepBtn();
+}
+if (altKeepBtn) {
+  altKeepBtn.addEventListener('click', () => setAltLocked(!altLocked));
+  updateAltKeepBtn();
+}
+// PC: Cキーでトグル(押しっぱなし対策にe.repeatで無視)
+document.addEventListener('keydown', e => { if (e.key.toLowerCase() === 'c' && !e.repeat) setAltLocked(!altLocked); });
 
 // Mouse drag for camera
 // 「地面や建物を指(カーソル)でつかんで動かす」感覚にするため、ドラッグしている位置が

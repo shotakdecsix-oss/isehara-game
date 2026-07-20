@@ -246,7 +246,11 @@ function exploreOnUpdate(dt) {
   const floorY = floorHeightAt(player.position.x, player.position.z, player.position.y);
   // ボタン/Spaceを押している間は高度の上限なく一定速度で上昇し続け、
   // 離すとその場の上向き速度から自然に重力で落下へ移行する。
-  if (hopHeld) {
+  // 高度キープ(altLocked、part7.js)がONの間は重力・上昇入力とも無視してその場の高さに静止する。
+  // 解除した瞬間はvelY=0のまま「else if (airborne)」に合流し、自然に落下が始まる。
+  if (altLocked) {
+    velY = 0;
+  } else if (hopHeld) {
     velY = RISE_SPEED;
     airborne = true;
     player.position.y += velY * dt;

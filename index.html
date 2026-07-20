@@ -192,6 +192,14 @@ body {
   -webkit-touch-callout:none; -webkit-tap-highlight-color:transparent;
 }
 #hopBtn:active { background:rgba(139,123,255,0.35); }
+/* 高度キープ(ホバー)トグル。上昇ボタンの少し左に並べ、bottom行を揃える */
+#altKeepBtn {
+  position:fixed; bottom:calc(var(--safe-bottom) + 6px); right:calc(var(--safe-right) + 76px);
+  width:52px; height:52px; border-radius:50%;
+  font-size:20px; color:var(--text); cursor:pointer; pointer-events:all; z-index:30;
+  user-select:none; -webkit-user-select:none; -webkit-tap-highlight-color:transparent;
+}
+#altKeepBtn.active { background:rgba(139,123,255,0.45); border-color:var(--accent); }
 /* Map overlay */
 #mapOverlay {
   position:fixed; top:0; left:0; width:100%; height:100%;
@@ -317,8 +325,8 @@ body.uiHidden #uiToggleBtn { opacity:0.45; }
 <!-- 操作ヘルプ(初回のみ自動表示。以後は?ボタンから) -->
 <div id="helpModal">
   <div id="info" class="glass">
-    PC: WASD移動 / Shiftダッシュ / Spaceジャンプ / ドラッグ回転<br>
-    スマホ: 左スティック移動(倒すほど加速) / 右スワイプ回転 / ⤴ジャンプ
+    PC: WASD移動 / Shiftダッシュ / Spaceジャンプ / ドラッグ回転 / Cで高度キープ切替<br>
+    スマホ: 左スティック移動(倒すほど加速) / 右スワイプ回転 / ⤴ジャンプ / 🔓で高度キープ切替
     <div id="deployInfo"></div>
     <button id="infoCloseBtn">閉じる</button>
   </div>
@@ -328,6 +336,7 @@ body.uiHidden #uiToggleBtn { opacity:0.45; }
 <div id="debugTileLegend" class="glass">🩺<span style="background:#555555"></span>未取得<span style="background:#dd3333"></span>取得中<span style="background:#3388dd"></span>地形待ち<span style="background:#ffaa22"></span>生成中<span style="background:#33cc55"></span>完了<span style="background:#9b3fd4"></span>諦め(未着)</div>
 <div id="minimap" class="glass"><canvas id="minimapCanvas" width="200" height="200"></canvas></div>
 <div id="joystick" class="glass"><div id="joystickKnob"></div></div>
+<button id="altKeepBtn" class="glass" title="高度キープ(空中でタップ)">🔓</button>
 <button id="hopBtn" class="glass">⤴</button>
 
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
