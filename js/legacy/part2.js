@@ -376,7 +376,11 @@ const UNIT_PLANE = new THREE.PlaneGeometry(1, 1);
 // thetaStart=45°で四角柱の面がX/Z軸に正対するようにしている(通常のBoxGeometryと向きを揃える)。
 const UNIT_TAPER4 = new THREE.CylinderGeometry(0.3, 0.5, 1, 4, 1, false, Math.PI / 4);
 const UNIT_TAPER_ROUND = new THREE.CylinderGeometry(0.3, 0.5, 1, 14);
-[UNIT_BOX, UNIT_CYL, UNIT_CONE4, UNIT_CONE8, UNIT_DOME, UNIT_SPH, UNIT_PLANE, UNIT_TAPER4, UNIT_TAPER_ROUND].forEach(gg => gg.userData.shared = true);
+// 【2026-07-20】スタジアム本体用。UNIT_CYL(8角)だと大きな建物では角ばって見えるため、
+// 楕円のスタジアム外形専用にもう少し滑らかな分割数の単位円柱を別途用意する
+// (addBuilding側でscale.set(w,h,d)して足元のフットプリントに合わせて引き伸ばす)。
+const UNIT_CYL_SMOOTH = new THREE.CylinderGeometry(0.5, 0.5, 1, 24);
+[UNIT_BOX, UNIT_CYL, UNIT_CONE4, UNIT_CONE8, UNIT_DOME, UNIT_SPH, UNIT_PLANE, UNIT_TAPER4, UNIT_TAPER_ROUND, UNIT_CYL_SMOOTH].forEach(gg => gg.userData.shared = true);
 function detailMesh(geo, mat, x, y, z, sx, sy, sz, ry) {
   const m = new THREE.Mesh(geo, mat);
   m.position.set(x, y, z);

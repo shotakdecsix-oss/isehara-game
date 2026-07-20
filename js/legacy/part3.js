@@ -240,8 +240,15 @@ function addBuilding(x, z, w, d, h, style, isReal, rot) {
     ? facadeMat(kind, wallC, (Math.random() * 2) | 0)
     : lambertMat(wallC, (style && style.emissive) || (MODE === 'space' ? 0x0a1420 : 0));
 
+  // 【2026-07-20】スタジアム・競技場・野球場・ドームは本体がただの四角い箱のままだと
+  // 屋根(dome/parapet)を載せてもシルエットが「箱」にしか見えないという指摘への対応。
+  // 実物の多くは円形・楕円形なので、本体ジオメトリ自体をフットプリントの外接矩形に
+  // 内接する楕円(共有の単位円柱UNIT_CYL_SMOOTHをw,h,dへ引き伸ばす)に変える。
+  // 共有ジオメトリなのでBoxGeometryのように毎棟生成しない(メモリ・GPU負荷は増えない)。
+  const isStadiumBody = type === 'stadium';
   const geo = isMushroom
     ? new THREE.CylinderGeometry(minWD * 0.42, minWD * 0.5, h, 10)
+    : isStadiumBody ? UNIT_CYL_SMOOTH
     : new THREE.BoxGeometry(w, h, d);
   if (kind) { // 側面に窓タイルを並べ、天面/底面は無地領域へ
     const tw = kind === 'ind' ? 8 : 3.6; // 1タイルの実幅
@@ -252,6 +259,7 @@ function addBuilding(x, z, w, d, h, style, isReal, rot) {
   }
   const mesh = new THREE.Mesh(geo, mat);
   mesh.position.set(x, gy + h/2, z);
+  if (isStadiumBody) mesh.scale.set(w, h, d); // 単位円柱(半径0.5・高さ1)をフットプリント寸法へ
   mesh.renderOrder = 2;
   scene.add(mesh);
   parts.push(mesh);
@@ -280,10 +288,23 @@ function addBuilding(x, z, w, d, h, style, isReal, rot) {
   }
 
   // ==== 屋根 — 切妻・寄棟・片流れ・陸屋根+パラペットをモード/種別/高さで出し分け ====
+  // 【2026-07-20】building=yes等、種別もroof:colourタグも無い建物(=type:'default'。
+  // 世界的に最も多いbuildingタグでOSM上ごく一般的)が軒並みこの0x5030a0固定の紫になり、
+  // 「紫の屋根ばかりで見た目のレパートリーが少ない」と報告される主因だった。
+  // house(住宅)と同じ理由付けが成り立つ(=タグから種別を確定できない建物なので、
+  // 何色と決め打ちするより国別パレットからばらけさせた方が自然)ため、houseと同じ
+  // roofPaletteを流用する。ただしhouseは「6割だけランダム化(残り4割は固定色で統一感を
+  // 出す)」という既存挙動を尊重して変えず、defaultは元が単色紫一色だった分の劣化がない
+  // よう常にランダム化する。
   let roofC = MODE === 'edo' ? 0x3a4450 /* 瓦 */ : (style && style.roofColor) ? style.roofColor : 0x5030a0;
   if (MODE === 'real' && type === 'house' && Math.random() < 0.6) {
     const rp = (cprof && cprof.roofPalette) || ROOF_COLS;
     roofC = rp[(Math.random() * rp.length) | 0]; // 住宅は屋根色もばらす
+  } else if (MODE === 'real' && type === 'default' && !(style && style.roofColor)) {
+    // roof:colourタグが実測値として付いている場合はそちらを尊重し(上のroofC初期値のまま)、
+    // タグが無く紫固定にフォールバックするケースだけをランダム化する
+    const rp = (cprof && cprof.roofPalette) || ROOF_COLS;
+    roofC = rp[(Math.random() * rp.length) | 0]; // 種別不明の建物も紫固定色ではなく国別パレットからばらす
   }
   const rm = roofSurfMat(roofC, null);
   // 屋根材(茅葺き/瓦葺き)は本来「時代」ではなく「農家の集落か、町場の町家か」で決まる
@@ -373,7 +394,22 @@ function addBuilding(x, z, w, d, h, style, isReal, rot) {
       const domeR = Math.sqrt(w * w + d * d) / 2 * 1.05;
       dm(UNIT_DOME, rm, x, gy + h * 0.3, z, domeR, domeR * 0.9, domeR);
     } else {
-      dm(PARAPET_GEO, rm, x, gy + h, z, w + 1.2, 1.6, d + 1.2);
+      // 【2026-07-20】本体が箱(BoxGeometry)から楕円(UNIT_CYL_SMOOTH)に変わったため、
+      // 屋根も四角いPARAPET_GEOのままだと丸い本体から角がはみ出て見える。
+      // 同じ楕円形状(UNIT_CYL_SMOOTH)を少し外側に張り出させた薄い庇に置き換える。
+      dm(UNIT_CYL_SMOOTH, rm, x, gy + h + 0.8, z, w + 1.4, 1.6, d + 1.4);
+      // ナイター照明塔。実物の野球場・競技場・サッカー場を一目でそれと分からせる
+      // 最も特徴的なディテールなので、四隅に配置する(建物密度が高い時はdetailOKで省略)。
+      if (detailOK()) {
+        const poleH = h + 9;
+        const poleMat = lambertMat(0xaaaaaa);
+        const lightMat = lambertMat(0xfff0c0, 0x554422);
+        [[0.62, 0.62], [-0.62, 0.62], [0.62, -0.62], [-0.62, -0.62]].forEach(([ox, oz]) => {
+          const px = x + ox * w, pz = z + oz * d;
+          dm(UNIT_CYL, poleMat, px, gy + poleH / 2, pz, 0.5, poleH, 0.5);
+          dm(UNIT_BOX, lightMat, px, gy + poleH + 0.3, pz, 2.6, 0.8, 1.8);
+        });
+      }
     }
   } else {
     // 一般建物(現実モード)

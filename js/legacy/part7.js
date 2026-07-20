@@ -107,6 +107,14 @@ function jumpToLatLon(toLat, toLon) {
   const farJump = !wideElev ||
     Math.abs(pos.x - wideCX) > WIDE_W * 0.32 || Math.abs(pos.z - wideCZ) > WIDE_D * 0.32;
   player.position.set(pos.x, 0, pos.z); // yはanimateの床追従が合わせる
+  // 【重要】checkOSMTiles(part8.js)の進行方向バイアスは「前回チェック時位置→現在位置」の
+  // 差分ベクトルで進行方向を推定している。ジャンプ直後にこれをそのまま使うと、テレポート量
+  // (数百m〜数百km)がまるごと「進行方向」として扱われてしまい、プレイヤーの意図(向いている
+  // 方向・歩いている方向)とは無関係な巨大バイアスがかかる(タイル先読みが変な方向に偏る)。
+  // ジャンプ時点の位置を基準として即座に書き換え、次回チェックでの差分を0にリセットする
+  // (=直後の1回は純粋な距離順で先読みされ、以降は実際の移動から自然に方向が推定される)。
+  _osmLastPx = pos.x; _osmLastPz = pos.z;
+  _osmMoveUx = 0; _osmMoveUz = 0;
   if (playerMarker) playerMarker.setLatLng([toLat, toLon]); // 吹き出し廃止に伴いopenPopup()も削除
   if (leafletMap) leafletMap.setView([toLat, toLon], leafletMap.getZoom());
   // 遠景(FAR)グリッドの外へ飛んだら、その場を中心に地形を取り直す(富士山などでも地形・標高が出る)。
