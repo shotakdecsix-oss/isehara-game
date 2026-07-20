@@ -558,7 +558,19 @@ function processRoadMeshQueue() {
 const PERF_PRESET = (() => {
   try {
     const v = localStorage.getItem('perfPreset');
-    if (v === 'lite' || v === 'high') return v;
+    if (v === 'lite' || v === 'std' || v === 'high') return v; // ユーザーが⚙で明示的に選んだ設定を最優先
+  } catch (e) {}
+  // 【2026-07-20】iPhone(Chrome)で「標準」のまま数分でクラッシュするという報告への対応。
+  // 標準プリセットは密集地でGPUメモリが数GBに達することがあり(下のPERF定義のコメント参照)、
+  // PCでは耐えられてもiOS(Chromeも含め全ブラウザの中身はWebKitで、タブのメモリ上限が
+  // デスクトップよりずっと厳しい)ではその前にタブごと落ちる。ユーザーが一度も⚙を
+  // 触っていない初回起動時に限り、スマホ・タブレット相当の端末は「軽量」を既定にする
+  // (上で明示的な保存値を最優先しているので、既に選択済みのユーザーには影響しない)。
+  try {
+    const ua = navigator.userAgent || '';
+    const isMobile = /iPhone|iPad|iPod|Android|Mobile/i.test(ua) ||
+      (navigator.maxTouchPoints > 1 && /Mac/i.test(navigator.platform || '')); // iPadOSはMac名乗りUAだがタッチあり
+    if (isMobile) return 'lite';
   } catch (e) {}
   return 'std';
 })();

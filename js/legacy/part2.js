@@ -90,7 +90,6 @@ function facadeMat(kind, color, variant) {
   const key = kind + '_' + color + '_' + variant;
   const hit = facadeCache.get(key);
   if (hit) return hit;
-  const S = 128;
   // 【2026-07-16】ビル系(office/apt、現実モード)はテクスチャを縦4フロア分にし、フロアごとに
   // 窓の点灯を独立に抽選する。従来は1フロア分のタイルを全フロアへUV繰り返ししていたため、
   // タイル内の窓の点灯状態が全フロアに複製され「全点灯 or 全消灯」のビルにしか見えなかった。
@@ -99,14 +98,26 @@ function facadeMat(kind, color, variant) {
   // それでも東京駅周辺でメモリ超過クラッシュが続いたため全面リバート(vFloors=1固定)。
   // 発光マップ半解像度化だけはメモリ削減として残す。再挑戦するなら「テクスチャを増やす」
   // 方式ではなく、シェーダーでUVからハッシュ点灯を計算する方式を検討すること。
+  const S = 128; // 論理座標(以下の描画コードは全てこの128基準の座標で書かれている。変更しないこと)
   const vFloors = 1;
   const H = S * vFloors;
-  const cv = document.createElement('canvas'); cv.width = S; cv.height = H;
+  // 【2026-07-20・スマホでのタブクラッシュ調査】facadeCacheは共有材で破棄する仕組みが無く、
+  // 1組み合わせごとに128x128(+発光用64x64)のCanvasテクスチャを永続的にGPUメモリへ積む。
+  // 「軽量」でも数分でクラッシュする報告があり、距離・件数を絞るだけの既存のlite設定は
+  // このテクスチャキャッシュの蓄積そのものには効いていなかった。軽量時は物理解像度だけを
+  // 75%(128→96相当)に落として1組み合わせあたりのメモリを約56%に減らす。描画コードは
+  // 全てS(=128)基準の座標のままにしたいので、Sそのものは変えずcanvasの物理サイズと
+  // contextのscaleだけ縮める(win()等のハードコードされた座標がずれないようにするため)。
+  const TEX_SCALE = PERF_PRESET === 'lite' ? 0.75 : 1;
+  const cv = document.createElement('canvas');
+  cv.width = Math.round(S * TEX_SCALE); cv.height = Math.round(H * TEX_SCALE);
   const g = cv.getContext('2d');
+  g.scale(TEX_SCALE, TEX_SCALE); // 以降 g.* への描画は従来通りS基準の座標で書ける
   // 発光マップは窓の矩形しか描かないので半解像度で十分(メモリ1/4)。scaleで論理座標は共通。
-  const ec = document.createElement('canvas'); ec.width = S / 2; ec.height = H / 2;
+  const ec = document.createElement('canvas');
+  ec.width = Math.round(S / 2 * TEX_SCALE); ec.height = Math.round(H / 2 * TEX_SCALE);
   const e = ec.getContext('2d');
-  e.scale(0.5, 0.5);
+  e.scale(0.5 * TEX_SCALE, 0.5 * TEX_SCALE);
   e.fillStyle = '#000'; e.fillRect(0, 0, S, H);
   // 決定的乱数 — 同じキーは常に同じ絵(チャンク再生成でも見た目が揺れない)
   let sd = 2166136261 ^ (variant * 977);
@@ -888,8 +899,13 @@ function fitRealBuildingToRoads(cx, cz, w, d, rot) {
 // 一因になりうると判断。破棄すると現在表示中の建物が壊れる(共有材のため安全に破棄できない)
 // ので、根本対策(参照カウント方式の破棄)は別途要検討。ここでは量子化を8段階に締めて
 // 組み合わせの理論上限を1/8(4096→512)に減らし、実際の増加ペースを抑える安全策のみ入れる。
+// 【2026-07-20・スマホでのタブクラッシュ調査】facadeCache/matCacheは共有材のため破棄する
+// 仕組みが無く(上のコメント参照)、量子化の段階数がそのままキャッシュ組み合わせ数の
+// 理論上限(steps^3)に効く。iPhone(軽量プリセットでも発生)からのクラッシュ報告を受け、
+// 「軽量」時だけ量子化を8→5段階にさらに締めて理論上限を512→125(約1/4)に減らす
+// (PC・標準/高品質は既存の見え方を変えないよう8のまま)。
 function quantizeColor(c, steps) {
-  steps = steps || 8;
+  steps = steps || (PERF_PRESET === 'lite' ? 5 : 8);
   const step = 256 / steps;
   const q = (v) => Math.min(255, Math.round(v / step) * step) | 0;
   return (q((c >> 16) & 255) << 16) | (q((c >> 8) & 255) << 8) | q(c & 255);
