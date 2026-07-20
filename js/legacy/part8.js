@@ -39,10 +39,30 @@ const OSM_TILE_CONCURRENCY = 3;
 let osmTileActiveCount = 0;
 let _osmMoveUx = 0, _osmMoveUz = 0; // プレイヤーの進行方向(単位ベクトル)。取得順の前方優先に使う
 const osmTileFailCount = new Map(); // タイルごとの失敗回数(3回まで再試行)
+// 【2026-07-21・gaveUp判定の再設計(修正5)】以前はosmTileFailCountが4に達すると理由を問わず
+// 「このタイルは諦めて建物生成をブロックしない」扱いにしていたが、429/502/504のような
+// インフラ側の一時障害まで同じカウンタに算入されてしまい、429ストーム中は移動中の足元タイルが
+// 本来のデータ問題ではないのに次々「諦め」に入っていた(先読み3枚バッチの失敗で3タイル分
+// まとめてカウントされる前借りも重なる)。osmTileFailCount自体はバックオフ・バッチ縮小判定
+// (nextFailCount)に使い続けるため挙動を変えず、「本当に諦めるべきか」の判定だけを
+// 新しいカウンタ(インフラ障害を数えない・1枚クエリの失敗だけ数える)に分離する。
+const osmTileHardFailCount = new Map();
+const gaveUpTiles = new Set(); // 「諦めて建物生成ブロックを解除した」タイル(デバッグオーバーレイの紫と対応)
 // 【2026-07-17・Fable5診断】タイルごとの「次回再試行可能時刻」(ms epoch)。以前は失敗時に
 // ワーカーがconcurrency枠を握ったままsleepしていたが、これを撤去して枠は即座に解放し、
 // 代わりにこのMapで各タイルの再試行間隔だけを管理する(下記fetchOSMTileBatch/processOSMTileQueue参照)。
 const osmTileNextRetryAt = new Map();
+// 【2026-07-21・実機ログ分析】移動を続けるとoverpass-api.deへの直接fetch(下記
+// fetchOSMTileBatch)が429(Too Many Requests)や502/504を連発する時間帯があり、その間
+// タイルが一切届かず生成が止まっていた。上のosmTileNextRetryAtは「タイル単位」の
+// バックオフだが、429はサーバー側のレート制限(IP単位)なので、他のタイルを叩き続けても
+// 429が続くだけで429ストームを自ら維持してしまう。タイル単位とは別に、全タイル共通の
+// 「今は一切叩かない」グローバル・クールダウンを設ける。
+// 【注】このfetchはブラウザからoverpass-api.deへ直接飛んでおり、サーバー経由のプロキシは
+// 介在しない(server/server.jsのpaceThrough/ミラー輪番はこの呼び出しには使われていない、
+// 別チャットの分析メモにあった「プロキシも502」という記述はこの経路には該当しない)。
+let osmGlobalCooldownUntil = 0;
+let _osm429Streak = 0;
 // 【重要】標高データ+初期OSMのロード完了までタイル取得を止めるゲート。
 // 以前は起動直後からタイル取得が走り、標高ロード(約8秒)より先に完了した
 // 境界タイルの道路が「平坦な地面の高さ」で生成され、その後地形が持ち上がると
@@ -279,6 +299,10 @@ function processTileData(data, tileCount) {
 // (以前は1件処理→待機→次の1件、という完全直列で、高速移動時に描写エリアの
 //  拡大が追いつかなかった)
 function processOSMTileQueue() {
+  // 【2026-07-21】429/502/504のグローバル・クールダウン中は新規リクエストを一切出さない
+  // (osmGlobalCooldownUntil参照。fetchOSMTileBatch側で設定)。クールダウン明けはcheckOSMTiles
+  // の周期呼び出し(最大0.5秒後)で自然に再開する。
+  if (Date.now() < osmGlobalCooldownUntil) return;
   while (osmTileActiveCount < OSM_TILE_CONCURRENCY && osmTileQueue.length > 0) {
     // 【2026-07-17・Fable5診断】backoff中(osmTileNextRetryAtが未来)のタイルしか
     // 残っていない場合はここでbreakする。以前は失敗時にワーカー自身が枠を握ったまま
@@ -600,7 +624,26 @@ async function fetchOSMTileBatch() {
       body: 'data=' + encodeURIComponent(query),
       signal: abortCtl.signal,
     });
-    if (!res.ok) throw new Error('HTTP ' + res.status);
+    if (!res.ok) {
+      // 【2026-07-21】429(レート制限)/502/504(上流不調)を受けた時だけ、全タイル共通の
+      // グローバル・クールダウンを設定する。個別タイルのbackoff(osmTileNextRetryAt)とは別物:
+      // あちらは「このタイルを次いつ叩けるか」、こちらは「今は誰も何も叩かない」というブレーキ。
+      // これが無いと、429を受けている間も他のタイルが3並列で叩き続けて429ストームを
+      // 自ら維持してしまっていた(実機ログで確認)。
+      if (res.status === 429 || res.status === 502 || res.status === 504) {
+        _osm429Streak++;
+        const ra = parseInt(res.headers.get('Retry-After'), 10); // 429にはRetry-Afterが付くことがある
+        const backoff = Number.isFinite(ra) ? ra * 1000
+          : Math.min(120000, 30000 * Math.pow(2, _osm429Streak - 1)); // 30s→60s→120s上限
+        osmGlobalCooldownUntil = Date.now() + backoff;
+      }
+      // 【2026-07-21・修正5】429/502/504はタイル固有のデータ問題ではなくインフラ側の
+      // 一時障害なので、下のcatchブロックでgaveUp判定(osmTileHardFailCount)に算入しない
+      // よう区別できるフラグを付けておく。
+      const e = new Error('HTTP ' + res.status);
+      e.infra = (res.status === 429 || res.status === 502 || res.status === 504);
+      throw e;
+    }
     const data = await res.json();
     if (!data || !data.elements) throw new Error('no elements');
     // 【重要・2026-07-16】Overpassは内部のtimeout/メモリ上限に達すると、例外にはならず
@@ -625,11 +668,14 @@ async function fetchOSMTileBatch() {
     if (received < declared) throw new Error(`incomplete: ${received}/${declared} elements`);
     // count検証を通過した完全な1タイル応答だけをIndexedDBへ保存(部分応答の汚染を防ぐ)
     if (batch.length === 1) osmCachePut(bboxes[0], data); // 保存キーもbboxes[0](絶対座標)に統一
+    _osm429Streak = 0; // 【2026-07-21】完全な応答を受け取れた=不調から回復したとみなし、次回のbackoffを短くリセット
     // 複数タイル分の要素が1つの配列で混ざって届くが、seenOSMWaysでway ID重複排除される
     // ので、1タイルの時と同じ processTileData にそのまま渡してよい。密度計算用にタイル枚数も渡す。
     processTileData(data, batch.length);
     keys.forEach(k => {
       osmTileFailCount.delete(k);
+      osmTileHardFailCount.delete(k); // 【2026-07-21・修正5】成功したので諦めカウントも白紙に戻す
+      gaveUpTiles.delete(k);
       roadReadyTiles.add(k); // このタイルの道路が確定 → 建物生成待ちのチャンクを解放してよい
     });
     // loadOSM()(part6.js)は起動直後に「🗺 マップを読み込み中...」のstickyトーストを
@@ -647,10 +693,21 @@ async function fetchOSMTileBatch() {
     // (3回失敗した時点では建物生成だけ先に進めてよい扱いにし、後から道路が届いたら反映される)
     // (AbortErrorも含め、失敗理由を問わずここに来れば必ずキューの枠を解放できる)
     failed = true;
+    // 【2026-07-21・修正5】429/502/504(インフラ側の一時障害)は「このタイルのデータに
+    // 問題がある」ことを意味しないため、諦め判定(osmTileHardFailCount/gaveUpTiles)には
+    // 算入しない。また3枚まとめバッチの失敗を3タイル分に等しく算入すると、先読み中の
+    // バッチ失敗だけで足元タイルの諦めカウントが「前借り」で溜まってしまうため、
+    // 1枚クエリの失敗だけを対象にする(nearSolo=現在地周辺は1枚クエリなので、
+    // 本当に現在地で連続失敗した場合はきちんとカウントされる)。
+    const isInfra = !!(e && e.infra);
     keys.forEach(k => {
       const n = (osmTileFailCount.get(k) || 0) + 1;
-      osmTileFailCount.set(k, n);
-      if (n >= 4) roadReadyTiles.add(k); // これ以上は建物生成をブロックしない(道路は背景で取得を続ける)
+      osmTileFailCount.set(k, n); // バックオフ・バッチ縮小判定(nextFailCount)用。挙動不変
+      if (!isInfra && batch.length === 1) {
+        const h = (osmTileHardFailCount.get(k) || 0) + 1;
+        osmTileHardFailCount.set(k, h);
+        if (h >= 4) { roadReadyTiles.add(k); gaveUpTiles.add(k); } // これ以上は建物生成をブロックしない(道路は背景で取得を続ける)
+      }
       queuedTiles.delete(k); // 常に再試行対象に戻す(checkOSMTiles が再度キューに積む)
       // 【2026-07-17・Fable5診断】以前はこの後にワーカー自身がsleepして間隔を作っていたが、
       // 枠を握ったままのsleepを撤去したため、代わりにタイルごとの再試行可能時刻をここへ記録する。
@@ -698,6 +755,17 @@ function checkCurrentTileRush() {
   if (_curTileRushFrame % 90 !== 0) return;
   const T = OSM_TILE_M;
   const tx = Math.floor(player.position.x / T), tz = Math.floor(player.position.z / T);
+  // 【2026-07-21・修正5(b)】諦め(gaveUp)は「本当にデータが無い」ではなくインフラ障害等での
+  // 仮判定でしかないので、プレイヤーが実際にそのタイルへ足を踏み入れたら白紙に戻して
+  // 取得をやり直す。roadReadyTilesからは外さない(生成済みの建物ゲートを巻き戻さない。
+  // 再取得が成功すればremoveBuildingsOverlappingRoadが道路と被る建物を自然に掃除する)。
+  const ptk = tx + ',' + tz;
+  if (gaveUpTiles.has(ptk)) {
+    gaveUpTiles.delete(ptk);
+    osmTileFailCount.delete(ptk);
+    osmTileHardFailCount.delete(ptk);
+    osmTileNextRetryAt.delete(ptk); // 即時再試行可
+  }
   let rush = !roadReadyTiles.has(tx + ',' + tz);
   if (!rush) {
     for (const r of pendingRoadMeshes) {

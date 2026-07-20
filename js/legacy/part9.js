@@ -157,15 +157,13 @@ function updateDebugTileOverlay(force) {
     const pending = (pendingByTile.get(key) || 0) + (dormantByTile.get(key) || 0);
     const done = doneByTile.get(key) || 0;
     const roadMeshPending = roadMeshPendingByTile.get(key) || 0;
-    const fails = osmTileFailCount.get(key) || 0;
-    // 【2026-07-20】fetchOSMTileBatch(part8.js)は同じタイルが4回連続失敗すると、建物生成を
-    // 永遠にブロックしないため「諦めて」roadReadyTilesへ強制的に追加する(道路取得自体は
-    // バックグラウンドで再試行を続ける)。これは「本当にデータが届いた」わけではないのに
-    // road===trueになってしまい、以前はそのまま緑(完了)表示していた。実機で「現在地のすぐ
-    // 近くの道路すら生成されず緑」という報告と一致(建物294件はOSMと無関係な手続き生成分)。
-    // 成功時はosmTileFailCountがdeleteされる(=0に戻る)ため、fails>=4はほぼ確実に
-    // 「諦めルートで済扱いになっただけ」を意味する。優先度高くgaveUpとして区別する。
-    const gaveUp = roadReady && fails >= 4;
+    // 【2026-07-21・gaveUp判定の再設計(修正5)】以前はosmTileFailCount(全失敗を数える。
+    // 429/502/504のようなインフラ側の一時障害も含む)が4に達したかどうかで判定していたため、
+    // 429ストーム中は本来データに問題が無いタイルまで次々「諦め」表示になっていた。
+    // 今はfetchOSMTileBatch(part8.js)側でインフラ障害を除外した専用カウンタ
+    // (osmTileHardFailCount)を使って「本当に諦めた」タイルだけをgaveUpTilesへ登録するので、
+    // ここでは再計算せずそのSetをそのまま参照する(単一の真実の情報源にする)。
+    const gaveUp = gaveUpTiles.has(key);
     let status;
     if (!queued) status = 'unqueued';
     else if (!roadReady) status = 'fetching';
