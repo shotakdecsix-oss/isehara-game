@@ -187,7 +187,16 @@ function updateDebugTileOverlay(force) {
   }
   // 範囲外に出た平面は隠すだけ(破棄しない。再度範囲に入ったらそのまま使い回す)
   for (const [key, mesh] of debugTilePlanes) if (!seen.has(key)) mesh.visible = false;
-  if (force || _debugTileFrame % 120 === 0) console.table(logRows); // 詳細な数値は~2秒ごとにコンソールへ
+  if (force || _debugTileFrame % 120 === 0) {
+    console.table(logRows); // 詳細な数値は~2秒ごとにコンソールへ
+    // 【2026-07-21・修正7(a)】全面赤(fetching)で停止するケースの切り分け用計器。
+    // 仮説A(グローバル・クールダウンが429継続で実質恒久化)なら cooldown(ms) が常に正の値になる。
+    // 仮説B(ワーカー枠のリーク)なら active=3 に張り付いたまま cooldown=0 で queue が減らない。
+    console.log('[fetch] active', osmTileActiveCount, 'queue', osmTileQueue.length,
+      'cooldown(ms)', Math.max(0, osmGlobalCooldownUntil - Date.now()),
+      'streak', _osm429Streak, 'records', buildingRecords.length, '/', PERF.bMax,
+      'dormant', dormantBuildings.length);
+  }
 }
 
 // ======= ANIMATION LOOP =======

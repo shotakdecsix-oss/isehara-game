@@ -35,7 +35,12 @@ const osmTileQueue = [];
 // 【2026-07-19・実験→撤回】private.coffeeメイン化に合わせて5へ上げたが、実機Renderログで
 // private.coffee/kumi.systemsが常時タイムアウトし、実質ほぼ全リクエストがoverpass-api.de
 // (公式に2並列/IPの制限)に集中していたことが判明。3のままの方が安全なので戻す。
-const OSM_TILE_CONCURRENCY = 3;
+// 【2026-07-21・Fable5相談+PowerShell/Node実測】単発逐次でも3回目で429、2並列・3並列
+// どちらも即全滅という実測結果から、支配要因は並列数そのものではなくスロット時間
+// (クエリ実行時間+負荷比例のクールダウン)と判明。ただし3本目は空きスロットが無い限り
+// ほぼ確実に429になる「無駄弾」でしかなく、failカウントとクールダウンを無駄に進めるだけ
+// なので、実測で確認済みの公式上限(2/IP)に合わせて2に戻す。
+const OSM_TILE_CONCURRENCY = 2;
 let osmTileActiveCount = 0;
 let _osmMoveUx = 0, _osmMoveUz = 0; // プレイヤーの進行方向(単位ベクトル)。取得順の前方優先に使う
 const osmTileFailCount = new Map(); // タイルごとの失敗回数(3回まで再試行)
@@ -63,6 +68,13 @@ const osmTileNextRetryAt = new Map();
 // 別チャットの分析メモにあった「プロキシも502」という記述はこの経路には該当しない)。
 let osmGlobalCooldownUntil = 0;
 let _osm429Streak = 0;
+// 【2026-07-21・Fable5相談】宣言timeoutを短縮した(下記buildOSMBatchQuery)ことで、
+// 通常はスロット占有時間(≒クールダウン)を縮められる。ただしOverpass側の実処理が
+// 短縮後の宣言値を超えて正常に進行中だった場合(504・remarkのtimed out)は、正常処理を
+// 打ち切ってしまった可能性があるため、そのタイルの次回試行だけは従来の長い宣言値へ
+// 一時的に戻す(=無限に短いtimeoutで再試行し続けて同じ理由で失敗し続けることを防ぐ)。
+// 成功したら通常の短い宣言値に戻す(下のkeys.forEachでdelete)。
+const osmTileTimeoutBoost = new Set();
 // 【重要】標高データ+初期OSMのロード完了までタイル取得を止めるゲート。
 // 以前は起動直後からタイル取得が走り、標高ロード(約8秒)より先に完了した
 // 境界タイルの道路が「平坦な地面の高さ」で生成され、その後地形が持ち上がると
@@ -372,10 +384,18 @@ const OSM_TILE_CLAUSES = [
 // 以上より、実測で完全応答を確認済みの3に戻す(6は密集地でリバースプロキシ側の硬い504が
 // 出るため不可)。部分応答が来てもcount検証が弾いて再試行される。
 const OSM_TILE_BATCH = 3;
-function buildOSMBatchQuery(bboxes) {
+function buildOSMBatchQuery(bboxes, boosted) {
   const parts = [];
   for (const clause of OSM_TILE_CLAUSES) for (const bb of bboxes) parts.push(clause + '(' + bb + ');');
-  const timeout = Math.min(60, 20 + bboxes.length * 6); // タイル数に応じて上流タイムアウトも延ばす
+  // 【2026-07-21・Fable5相談】宣言timeoutはOverpassのコスト見積り(≒スロット占有時間)に
+  // 直結するため、実測(3タイルまとめ≒14秒で完了)に対して十分な余裕を持たせつつ、
+  // 従来値(20+n*6、3枚で38秒)より短くしてスロット占有時間を縮める。ただし京橋・八重洲
+  // 級の密集地では過去にサーバー側処理が35秒を超えた実績があるため、下げ過ぎて正常処理を
+  // 打ち切らないよう15/25秒案より保守的な値に留める。boosted=true(直前にこのタイルが
+  // timeout系で失敗した)時だけ従来の長い値にフォールバックする。
+  const timeout = boosted
+    ? Math.min(60, 20 + bboxes.length * 6) // 従来値(ブースト時のフォールバック)
+    : Math.min(40, 15 + bboxes.length * 5); // 通常値(2026-07-21短縮。1枚=20秒、3枚=30秒)
   // 【重要・2026-07-16】以前はここでOverpass側のtimeout秒数だけ組み立てて文字列を返し、
   // 呼び出し側(fetchOSMTileBatch)は全く別の固定値(35秒)でクライアント側abortしていた。
   // 東京駅八重洲・京橋のような超高密度エリアでは6タイルまとめクエリがOverpass側の
@@ -441,6 +461,27 @@ function osmCachePut(key, data) { // fire-and-forget
     if (!db) return;
     try { db.transaction('tiles', 'readwrite').objectStore('tiles').put({ ts: Date.now(), data }, OSM_TILE_CACHE_VER + ':' + key); } catch (e) {}
   });
+}
+
+// 【2026-07-21・Fable5相談】429を受けた時、実際にあと何秒待てばスロットが空くのかを
+// /api/status(このエンドポイント自体はレート制限の消費対象外・軽量)で確認する。
+// "Slot available after: <timestamp>, in N seconds." という行が空きスロット数だけ
+// 並ぶので、一番早く空く行(最小のN)を採用する。取得・パース失敗時はnullを返し、
+// 呼び出し側は既存の指数バックオフのままにする。
+async function fetchOverpassSlotWaitMs() {
+  try {
+    const res = await fetch('https://overpass-api.de/api/status');
+    if (!res.ok) return null;
+    const text = await res.text();
+    const rl = text.match(/Rate limit:\s*(\d+)/);
+    const avail = text.match(/(\d+)\s*slots? available now/);
+    console.log('[overpass status] rate limit=' + (rl ? rl[1] : '?') + ' available now=' + (avail ? avail[1] : '0'));
+    const waits = [...text.matchAll(/in (\d+) seconds/g)].map(m => parseInt(m[1], 10)).filter(Number.isFinite);
+    if (waits.length === 0) return null;
+    return Math.min(...waits) * 1000;
+  } catch (e) {
+    return null;
+  }
 }
 
 async function fetchOSMTileBatch() {
@@ -538,7 +579,8 @@ async function fetchOSMTileBatch() {
     const minLon = Math.min(ll00.lon, ll11.lon), maxLon = Math.max(ll00.lon, ll11.lon);
     return `${minLat.toFixed(5)},${minLon.toFixed(5)},${maxLat.toFixed(5)},${maxLon.toFixed(5)}`;
   });
-  const { query, timeout: osmTimeoutSec } = buildOSMBatchQuery(bboxes);
+  const boosted = keys.some(k => osmTileTimeoutBoost.has(k));
+  const { query, timeout: osmTimeoutSec } = buildOSMBatchQuery(bboxes, boosted);
   let failed = false;
   // 【重要】以前は Promise.race([fetch(...), timeoutPromise]) で「50秒で見切る」だけだった。
   // これはtimeoutPromise側が先に解決してcatchに落ちるだけで、負けた方のfetch自体は
@@ -636,12 +678,29 @@ async function fetchOSMTileBatch() {
         const backoff = Number.isFinite(ra) ? ra * 1000
           : Math.min(120000, 30000 * Math.pow(2, _osm429Streak - 1)); // 30s→60s→120s上限
         osmGlobalCooldownUntil = Date.now() + backoff;
+        // 【2026-07-21・Fable5相談】429の場合、上の指数バックオフは推測値でしかない。
+        // /api/statusは自分のスロット消費対象外の軽量エンドポイントで、"Slot available
+        // after: ..., in N seconds." の行から実際の待ち秒数を読み取れる。取得できたら
+        // より正確な値でosmGlobalCooldownUntilを上書きする(非同期・失敗しても現状の
+        // 推測バックオフのままなので無害)。overpass-api.deはDNSラウンドロビンで複数の
+        // バックエンドを持ち、statusと直前のPOSTが別ホストに当たっている可能性があるため
+        // 精度は完全ではない前提だが、公式ドキュメントが「429なら15秒待って再送」と
+        // 明記している通り、現行の指数バックオフ(最大120秒)より短くても採用してよい。
+        if (res.status === 429) {
+          fetchOverpassSlotWaitMs().then(ms => {
+            if (ms != null) osmGlobalCooldownUntil = Date.now() + ms;
+          });
+        }
       }
       // 【2026-07-21・修正5】429/502/504はタイル固有のデータ問題ではなくインフラ側の
       // 一時障害なので、下のcatchブロックでgaveUp判定(osmTileHardFailCount)に算入しない
-      // よう区別できるフラグを付けておく。
+      // よう区別できるフラグを付けておく。504は宣言timeout/maxsizeがサーバーの残りリソースに
+      // 対して大きすぎる場合の応答で、宣言timeoutを短縮した(buildOSMBatchQuery)ことで
+      // 正常処理を打ち切ってしまった可能性があるため、次回はブースト(長いtimeout)で
+      // 再試行させる目印も付ける。
       const e = new Error('HTTP ' + res.status);
       e.infra = (res.status === 429 || res.status === 502 || res.status === 504);
+      e.wasTimeout = (res.status === 504);
       throw e;
     }
     const data = await res.json();
@@ -655,7 +714,9 @@ async function fetchOSMTileBatch() {
     // 空地が生まれていた(実機診断で確認)。remarkにtimeout/memoryを示す文言があれば
     // 部分結果とみなし、失敗として扱って再試行キューに戻す。
     if (data.remark && /timed out|timeout|out of memory/i.test(data.remark)) {
-      throw new Error('partial result: ' + data.remark);
+      const e2 = new Error('partial result: ' + data.remark);
+      e2.wasTimeout = true; // 【2026-07-21・Fable5相談】次回はブースト(長いtimeout)で再試行
+      throw e2;
     }
     // 【重要・2026-07-16】無言の部分応答の検出(buildOSMBatchQueryのout count;参照)。
     // count要素(必ず要素出力の先頭)の宣言総数 vs 実受信数を照合。count要素自体が無い
@@ -676,6 +737,7 @@ async function fetchOSMTileBatch() {
       osmTileFailCount.delete(k);
       osmTileHardFailCount.delete(k); // 【2026-07-21・修正5】成功したので諦めカウントも白紙に戻す
       gaveUpTiles.delete(k);
+      osmTileTimeoutBoost.delete(k); // 【2026-07-21・Fable5相談】成功したので短いtimeout宣言に戻す
       roadReadyTiles.add(k); // このタイルの道路が確定 → 建物生成待ちのチャンクを解放してよい
     });
     // loadOSM()(part6.js)は起動直後に「🗺 マップを読み込み中...」のstickyトーストを
@@ -700,6 +762,12 @@ async function fetchOSMTileBatch() {
     // 1枚クエリの失敗だけを対象にする(nearSolo=現在地周辺は1枚クエリなので、
     // 本当に現在地で連続失敗した場合はきちんとカウントされる)。
     const isInfra = !!(e && e.infra);
+    // 【2026-07-21・Fable5相談】504・remarkのtimed out(=宣言timeoutを短縮したことで
+    // Overpass側の正常処理を打ち切ってしまった疑いがあるケース)は、次回このタイルを
+    // 再試行する時だけ従来の長いtimeout宣言に戻す。同じ理由の失敗を短いtimeoutのまま
+    // 何度も繰り返させないための一時的な措置(成功したら上のkeys.forEachで解除)。
+    const isTimeout = !!(e && e.wasTimeout);
+    if (isTimeout) keys.forEach(k => osmTileTimeoutBoost.add(k));
     keys.forEach(k => {
       const n = (osmTileFailCount.get(k) || 0) + 1;
       osmTileFailCount.set(k, n); // バックオフ・バッチ縮小判定(nextFailCount)用。挙動不変

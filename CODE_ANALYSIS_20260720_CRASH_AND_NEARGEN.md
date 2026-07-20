@@ -331,6 +331,143 @@ if (gaveUpTiles.has(ptk)) {
 - 修正1(グローバル・クールダウン)と併用が前提。クールダウンが429の連鎖自体を減らし、
   本修正が「残った失敗を諦めに直結させない」役割を分担する。
 
+## 追記 2026-07-21(3): 黄色タイルで実建物の生成がほぼ止まる(道路は生成される)
+
+黄色(buildingPending)=「道路・地形は確定、建物残件あり」。つまり取得層は正常で、
+**processPendingBuildings(part9.js)が建物を消化できていない**。オーバーレイの
+buildPendingは pendingByTile + dormantByTile の合算である点に注意(dormant行きも黄色に見える)。
+
+### 最有力: bMax飽和デッドロック【原因候補A】
+
+part9.js:458 `if (buildingRecords.length >= PERF.bMax) { dormantBuildings.push(b); continue; }`
+で、上限到達中は新規実建物が**全てdormant直行**する。本来はunloadFarBuildingsの
+ヒストグラム選別(part1.js:795-812)が枠を空けるはずだが、2つの穴がある:
+
+1. **ヒストグラムのtarget未達バグ**: target = bMax*0.85 だが、ヒストグラムは実建物
+   (rec.real)しか数えない(part1.js:799)。bMaxは手続き建物込みの総数なので、
+   手続き建物の比率が高い街では実建物の累計がtargetに届かず、`cutoff = NBIN`(=4km)の
+   まま**絞り込みが一切効かない**。
+2. **手続き建物は上限到達中も1800m固定**(part1.js:813 d2Proc)で、キャップ占有分が減らない。
+   liteはbMax=6000・チャンク9×9の密集住宅+実建物1400m圏で容易に飽和する。
+
+飽和すると: 新規実建物→dormant直行、reactivateも `>= PERF.bMax` ガード(part1.js:853)で
+停止、枠は空かない → **実建物だけ完全停止、道路は無関係に生成され続ける**。症状と一致。
+
+**修正6の実装指示**(対象: `js/legacy/part1.js` unloadFarBuildings):
+
+- ヒストグラムのカットオフ計算を「近い順にtargetまで数える」から
+  「**超過分を遠い側から数えて解放する**」に変える:
+```js
+if (_nearCap) {
+  // (ヒストグラム構築は現状のまま)
+  const needFree = buildingRecords.length - PERF.bMax * 0.85; // 総数基準の超過分
+  let acc = 0, cutoff = NBIN;
+  for (let i = NBIN - 1; i >= 0; i--) {          // 遠いビンから累積
+    acc += hist[i];
+    if (acc >= needFree) { cutoff = i; break; }
+  }
+  const cutR = Math.max(cutoff, 3) * BIN;         // 最低300mは保持(足元全消し防止)
+  if (cutR * cutR < d2Real) d2Real = cutR * cutR;
+}
+```
+  実建物が少なくても「遠い実建物から超過分だけ」確実に解放される。
+- 上限到達中は手続き建物も詰める: `const d2Proc = (_nearCap ? BUILDING_GEN_DIST_PROC
+  : BUILDING_UNLOAD_DIST_PROC) ** 2;`(1800→1000m。チャンク再生成で復活するので安全)。
+- reactivateのガード(part1.js:853)は `>= PERF.bMax` のままでよい(解放が効けば自然に外れる)。
+
+### 副因: 道路バックログによる建物予算の絞り【原因候補B】
+
+part9.js:434 `if (_roadBacklogForGate > 80) _buildBudget = min(budget, rush?40:5)`。
+移動継続中は道路キューが常時80超になりやすく、建物は5棟/フレームに固定される。
+さらに再試行(_tries)の空回りが予算枠を消費するため、実効生成数はほぼ0になり得る。
+
+**修正**: 絞り条件を「近傍に道路残件がある場合」に限定する。pendingRoadMeshesのうち
+プレイヤー800m以内の残件数を数え(checkCurrentTileRushの走査と同様、90フレーム周期の
+キャッシュで可)、それが0なら絞らない。遠方の道路が詰まっているだけなら建物を止める
+理由はない(「地形→道路→建物」の順序は同一エリア内でのみ意味を持つ)。
+
+### 診断手順(実装前に必ず確認)
+
+黄色停止の状態でPCのコンソールに貼る:
+```js
+console.log('records', buildingRecords.length, '/bMax', PERF.bMax,
+  'dormant', dormantBuildings.length,
+  'pending', pendingBuildings.length - pendingBuildingIdx,
+  'roadQ', pendingRoadMeshes.length);
+```
+- `records`がbMax付近(95%以上) → 原因候補Aで確定。修正6を実施。
+- recordsに余裕があり`roadQ`が常時80超 → 原因候補B。絞り条件の修正を実施。
+- どちらでもない場合はログ(この数値の推移)を分析へ回すこと。
+
+### 補足: 修正5とのトレードオフ(既知)
+
+修正5でインフラ障害がgaveUpに算入されなくなったため、429ストーム中は隣接タイルが
+「fetching(赤)」のまま長く残り、タイル境界64m帯の建物が隣待ち(_tries×キュー1周)で
+遅くなるケースは増え得る。これは黄色停止とは別問題で、本質対応は問題2(b)の
+「近傍専用再試行列」(実装指示済み・未着手ならそちらを優先度上げ)。
+
+## 追記 2026-07-21(4): 全面赤(fetching)で道路ごと停止したケースのログ分析
+
+### ログの読み取り(プレイヤー=タイル20,-17、東京エリア)
+
+- 西〜中心の広範囲が`fetching`(赤)で、**failsが0〜4と小さいのに道路データが一切届いていない**。
+  現在地タイルもfails=4・road=false。失敗回数が少ない=そもそも試行自体がほとんど
+  走っていない。→ **取得層が沈黙している**のが直接原因(タイル個別の失敗ではない)。
+- 東側(通過済みエリア)はroadReady済みでbuildDone合計≈1.1万棟、buildPending合計≈6万棟。
+  bMax(std=12000)にほぼ到達している可能性が高く、追記(3)の飽和デッドロックも併発しうる。
+
+### 仮説A(最有力): グローバル・クールダウンの実質恒久化
+
+修正1のクールダウンは、429が続く限りstreakが積み上がり(リセットは成功時のみ)、
+120秒上限に張り付く。持続的なレート制限下では「120秒に1回、数リクエスト試行→即429→
+また120秒沈黙」となり、外形的には正しい振る舞いだが体感は「完全停止」。
+failsが小さいままなのはこの「試行回数自体が少ない」状態と整合する。
+
+### 仮説B(要除外): ワーカー枠のリーク
+
+`osmTileActiveCount`が3に張り付いたままデクリメントされない経路が修正1実装時に
+できていないか(新設した`!res.ok`分岐がfinallyを迂回していないか等)。ログからは
+判別不可能なので計器で切り分ける。
+
+### 実装指示(修正7)
+
+**(a) 取得層の計器を追加【最優先・これが無いと切り分け不能】**
+
+`updateDebugTileOverlay`のconsole.table直後(part9.js:190付近)に1行追加:
+```js
+console.log('[fetch] active', osmTileActiveCount, 'queue', osmTileQueue.length,
+  'cooldown(ms)', Math.max(0, osmGlobalCooldownUntil - Date.now()),
+  'streak', _osm429Streak, 'records', buildingRecords.length, '/', PERF.bMax,
+  'dormant', dormantBuildings.length);
+```
+判定: cooldownが常に正の値 → 仮説A確定。active=3のままcooldown=0でqueueが減らない →
+仮説B確定(デクリメント漏れを修正)。recordsがbMax≒到達なら修正6も必須。
+
+**(b) 仮説A対策: 現在地タイルだけの「ミラー緊急経路」**
+
+クールダウン中でも**現在地タイル1枚だけ**は別ホストで取得を試みる。リクエスト量は
+最小(1枚クエリ・90フレーム周期で未取得時のみ)なので、429の原因である総量には影響しない。
+```js
+// checkCurrentTileRush(part8.js:696)内、rush判定がtrueかつroadReady未達のとき:
+// osmGlobalCooldownUntil中でも、専用フラグで1枚クエリを
+// https://overpass.kumi.systems/api/interpreter へ発行(通常キューは通さない)。
+// 成功したら通常のprocessTileData/roadReadyTiles.addと同じ処理。
+// 失敗したらそのまま(次の90フレーム周期でまた1回だけ)。同時実行は常に1本まで。
+```
+private.coffeeメイン化の失敗(実測)とは異なり、これは「本線が沈黙中の足元1枚限定の保険」。
+kumi.systemsが不調ならprivate.coffeeを第2候補に。
+
+**(c) クールダウンの回復を段階的に**
+
+streakのリセットを「成功時に0」から「成功時に半減(`Math.floor(_osm429Streak/2)`)、
+連続2回成功で0」へ。一度の偶然の成功で30秒に戻って再ストームを起こすのを防ぎつつ、
+回復局面では段階的に間隔が縮む。
+
+**(d) 順序の整理**
+
+このケースでは修正6(bMax飽和)も併発している可能性が高い。実装順:
+計器(a) → 実測で仮説A/B確定 → (b)(c)or枠リーク修正 → 修正6。
+
 ## 実装順の提案
 
 1. 発見B(a) 冪等化 — 小差分・確実なバグ修正
