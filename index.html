@@ -247,8 +247,10 @@ body {
 }
 #waterOverlay.active { display:block; }
 @keyframes waterShimmer { 0%,100% { opacity:0.82; } 50% { opacity:1; } }
-/* UI非表示: スティック・ジャンプ・👁トグル以外を隠して景色を全画面で楽しむモード */
-body.uiHidden #hudRail, body.uiHidden #addressDisplay, body.uiHidden #gpsDisplay,
+/* UI非表示: スティック・ジャンプ・👁トグル・現在地名(#addressDisplay)以外を隠して
+   景色を全画面で楽しむモード。地名表示は残す(ユーザー要望・2026-07-23)。
+   #gpsDisplay(タップで開く座標・標高の詳細)は従来通り非表示のまま。 */
+body.uiHidden #hudRail, body.uiHidden #gpsDisplay,
 body.uiHidden #perfCtrl, body.uiHidden #minimap, body.uiHidden #credit,
 body.uiHidden #status, body.uiHidden #helpModal { display:none !important; }
 body.uiHidden #uiToggleBtn { opacity:0.45; }
