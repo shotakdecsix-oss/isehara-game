@@ -166,6 +166,11 @@ function updateDebugTileOverlay(force) {
   const bump = (map, k) => map.set(k, (map.get(k) || 0) + 1);
   const pendingByTile = new Map(), dormantByTile = new Map(), doneByTile = new Map();
   for (let i = pendingBuildingIdx; i < pendingBuildings.length; i++) bump(pendingByTile, tileKeyOf(pendingBuildings[i].x, pendingBuildings[i].z));
+  // 【2026-07-21・Fable5診断(b)の注意点】隔離キュー(chunkWaitBuildings/tileWaitBuildings)の
+  // 建物もpendingByTileに含めないと、実際は「もうすぐ生成される」状態なのに表示上の
+  // buildQueuedが実態より少なく出てしまう(退行)。
+  for (const e of chunkWaitBuildings.values()) for (const b of e.arr) bump(pendingByTile, tileKeyOf(b.x, b.z));
+  for (const e of tileWaitBuildings.values()) for (const b of e.arr) bump(pendingByTile, tileKeyOf(b.x, b.z));
   for (const arr of dormantGrid.values()) for (const b of arr) bump(dormantByTile, tileKeyOf(b.x, b.z));
   for (const rec of buildingRecords) bump(doneByTile, tileKeyOf(rec.x, rec.z));
   // 【2026-07-19】roadReadyTiles は「道路データを受信・登録済み」なだけで、実際の3Dメッシュ化
@@ -276,7 +281,11 @@ function updateDebugTileOverlay(force) {
     // (上のテーブル)が減らないなら生成そのものより供給(OSM取得)側の方が速い、と切り分けられる。
     console.log('[buildgen] budget', _lastBuildBudget, 'roadBacklogGate', _lastRoadBacklogForGate,
       'rush', _lastCurTileRush, 'generated/2s', _bgGenerated, 'requeued/2s', _bgRequeued,
-      'toDormant/2s', _bgDormant, 'pendingTotal', pendingBuildings.length - pendingBuildingIdx);
+      'toDormant/2s', _bgDormant, 'pendingTotal', pendingBuildings.length - pendingBuildingIdx,
+      // 【2026-07-21・Fable5診断(b)】隔離キューの規模(chunkWaitキー数/tileWaitキー数/合計件数)。
+      // requeued/2sが今後小さくなっても、この件数が大きければ「空回りは止まったが、
+      // ゲート不成立の建物自体はまだ多い」ことを示す(正常。スキャナが低頻度で捌く)。
+      'gateWaitKeys', chunkWaitBuildings.size + tileWaitBuildings.size, 'gateWaitTotal', gateWaitTotalCount());
     _bgGenerated = 0; _bgRequeued = 0; _bgDormant = 0;
   }
 }
@@ -577,15 +586,15 @@ function animate() {
       }
     }
     const bcx = Math.floor(b.x / CHUNK_SIZE), bcz = Math.floor(b.z / CHUNK_SIZE);
+    // 【2026-07-21・Fable5診断(b)】以前はここで「ダメなら末尾へpush」を1件ずつ繰り返しており、
+    // 密集地で地形NEARの網羅が追いつかない間は同じ建物群が0.5秒毎に先頭付近へ戻ってきては
+    // また末尾へ戻される、というタイトループで生成予算の過半(実機計測56%)を空費していた
+    // (part1.js冒頭のコメント参照)。チャンク単位の隔離キューへ退避し、低頻度スキャナ
+    // (scanGateWaitQueues)がキー単位でreadyを判定してからまとめて戻す方式に変更。
     if (!IS_MEIJI && !chunkNearTerrainReady(bcx, bcz)) {
-      b._tries = (b._tries || 0) + 1;
-      // 【2026-07-19】200回(プレイヤーが二度と戻らない遠方チャンク等)試しても揃わなければ、
-      // 諦めてFAR基準のまま生成する(無限に足踏みし続けるのを防ぐ)。
-      // ただし失敗のたび配列末尾へ戻す方式(下記)のため、密集地でバックログが数千件ある間は
-      // 「末尾へ戻ってから次に再判定されるまで」が数十フレームかかり、200回待つと数十秒〜
-      // 数分の「近くだけ穴が空いたドーナツ状」になっていた(実機報告)。40回に短縮し、
-      // 最悪ケースの待ち時間の天井を下げる(フォールバック自体は既存の安全策のまま)。
-      if (b._tries < 40) { pendingBuildings.push(b); _bgRequeued++; continue; }
+      chunkWaitAdd(bcx + ',' + bcz, b);
+      _bgRequeued++;
+      continue;
     }
     // 【重要・2026-07-16】実OSM建物(b.real)はisOnRoadチェックを免除する。isOnRoadは
     // 建物の外接円半径(halfDiag=対角線の半分)で道路中心線との距離を見るため、
@@ -602,8 +611,11 @@ function animate() {
     // 建物が道路に被るレースの対策)。地形待ちと同じ_tries機構で、200回試しても
     // 揃わなければ(隣タイルが4回失敗で諦め扱いになった場合など)待たずに生成する。
     if (b.real && !osmTilesReadyAround(b.x, b.z, 64)) {
-      b._tries = (b._tries || 0) + 1;
-      if (b._tries < 40) { pendingBuildings.push(b); _bgRequeued++; continue; } // 【2026-07-19】200→40(理由は上のchunkNearTerrainReady側コメント参照)
+      // 【2026-07-21・Fable5診断(b)】チャンク地形待ちと同じ理由で隔離キューへ。キーは建物自身の
+      // 所属タイル(周辺64mの判定はこのタイル境界付近でしか変わらないため、代表点判定で十分)。
+      tileWaitAdd(Math.floor(b.x / OSM_TILE_M) + ',' + Math.floor(b.z / OSM_TILE_M), b);
+      _bgRequeued++;
+      continue;
     }
     // 実建物はゲーム側の広い道路・線路リボンに食い込む分だけ寸法を縮めてから生成する
     // (part2.js fitRealBuildingToRoads参照。道路レコード登録はデータ到着時に同期で済んで
@@ -623,6 +635,7 @@ function animate() {
   // (長時間プレイでの重量化→クラッシュ)のを防ぐため、遠方の建物を解放する
   unloadFarBuildings();
   reactivateNearbyDormantBuildings(); // 逆に、近づいた遠景建物は生成キューへ復帰させる
+  scanGateWaitQueues(); // 【2026-07-21・Fable5診断(b)】ゲート待ち隔離キューの低頻度スキャン
   // (2026-07-16: 高度LOD(updateAltitudeLOD)は撤去 — 40m/300mまで絞ってもクラッシュ防止に
   //  効かないことが実証され、上空の「スカスカ感」の害だけが残ったため。クラッシュの実対策は
   //  建物総数キャップ(PERF.bMax)+細街路メッシュ距離制限で達成済み)

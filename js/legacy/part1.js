@@ -927,6 +927,72 @@ function reactivateNearbyDormantBuildings() {
   }
 }
 
+// ======= 【2026-07-21・Fable5診断(b)】ゲート待ち建物の隔離キュー =======
+// 以前はchunkNearTerrainReady/osmTilesReadyAroundが不成立の建物を、1件ずつ「ダメなら末尾へ
+// 戻す」方式で扱っていた(part9.js生成ループ)。密集地では地形NEARの網羅が建物到着に
+// 追いつかない時間帯があり、この「末尾へ戻すだけ」の建物が生成予算の過半(実機計測で56%)を
+// 空費する「requeued空回り」の直接原因になっていた(同じ建物群が0.5秒毎の距離再ソートで
+// また先頭付近に戻ってきては、また同じ理由で末尾へ戻される、というタイトループ)。
+// ゲート不成立の建物を「建物ごと」ではなく「ゲートのキー(チャンク/タイル)単位」で
+// グループ化して退避し、90フレーム毎の低頻度スキャナがキー単位(密集地でも数十)で
+// readyを再判定する(数万棟の毎フレーム走査 → 数十キーの間欠チェックに激減)。
+const chunkWaitBuildings = new Map(); // "bcx,bcz" -> { arr: 建物[], tries: number }
+const tileWaitBuildings = new Map();  // 建物自身の所属タイル"tx,tz" -> { arr: 建物[], tries: number }
+function chunkWaitAdd(key, b) {
+  let e = chunkWaitBuildings.get(key);
+  if (!e) { e = { arr: [], tries: 0 }; chunkWaitBuildings.set(key, e); }
+  e.arr.push(b);
+}
+function tileWaitAdd(key, b) {
+  let e = tileWaitBuildings.get(key);
+  if (!e) { e = { arr: [], tries: 0 }; tileWaitBuildings.set(key, e); }
+  e.arr.push(b);
+}
+let _gateWaitScanFrame = 0;
+function scanGateWaitQueues() {
+  _gateWaitScanFrame++;
+  if (_gateWaitScanFrame % 90 !== 0) return;
+  if (chunkWaitBuildings.size === 0 && tileWaitBuildings.size === 0) return;
+  const px = player.position.x, pz = player.position.z;
+  const d2Real = BUILDING_GEN_DIST_REAL * BUILDING_GEN_DIST_REAL;
+  // 【Fable5指摘・注意点】(1)隔離キューの建物もプレイヤーが離れたらdormantへ退避しないと、
+  // 二度と戻れない待機列に永久に残り続ける。(2)戻す際は1サイクルあたりの件数に上限を設け、
+  // 多数のキーが同時にreadyになった瞬間の雪崩(pendingBuildingsへの一括流入)を防ぐ。
+  let returnBudget = 2000;
+  const scanMap = (map, isReady) => {
+    for (const [key, e] of map) {
+      e.tries++;
+      // 【2026-07-19由来・安全弁】20回(約30秒)試しても揃わなければ、諦めてFAR基準のまま
+      // 生成する(無限に待ち続けるのを防ぐ。元の_tries<40の考え方を1キー単位に踏襲)。
+      const ready = isReady(key, e) || e.tries >= 20;
+      const keep = [];
+      for (const b of e.arr) {
+        const dx = b.x - px, dz = b.z - pz;
+        if (b.real && dx * dx + dz * dz > d2Real) { dormantAdd(b); continue; } // 離れた分はdormantへ
+        if (ready && returnBudget > 0) { pendingBuildings.push(b); returnBudget--; continue; }
+        keep.push(b);
+      }
+      if (keep.length === 0) map.delete(key); else e.arr = keep;
+    }
+  };
+  scanMap(chunkWaitBuildings, (key) => {
+    if (IS_MEIJI) return true;
+    const parts = key.split(',');
+    return chunkNearTerrainReady(parseInt(parts[0], 10), parseInt(parts[1], 10));
+  });
+  scanMap(tileWaitBuildings, (key, e) => {
+    const rep = e.arr[0];
+    return !!rep && osmTilesReadyAround(rep.x, rep.z, 64);
+  });
+}
+// ログ・デバッグオーバーレイ用: 隔離キュー内の総件数(呼び出し頻度が低い場所でのみ使う想定)
+function gateWaitTotalCount() {
+  let n = 0;
+  for (const e of chunkWaitBuildings.values()) n += e.arr.length;
+  for (const e of tileWaitBuildings.values()) n += e.arr.length;
+  return n;
+}
+
 let placedBuildings = [];  // {x,z,r,ck} for landuse de-duplication
 // 【2026-07-17・CODE_REVIEW_20260717 P1】hasBuildingNearbyはplacedBuildings全件を線形走査
 // していた唯一残った「増え続ける配列の全件走査」ホットパス(generateChunkが1チャンクあたり
