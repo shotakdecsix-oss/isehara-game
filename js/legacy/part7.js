@@ -299,10 +299,13 @@ document.getElementById('geoBtn').addEventListener('click', () => {
     { enableHighAccuracy: true, timeout: 10000 });
 });
 
-function updateGPS(t) {
+// 【2026-07-23修正】引数名がグローバルのi18n関数t()と衝突し、この関数内で
+// t('gpsElevation',...)を呼ぶと引数(経過時間の数値)の方が優先されて
+// "t is not a function" で落ちていたため、引数名をnowTに変更(中身は変更なし)。
+function updateGPS(nowT) {
   if (uiHidden) return; // UI非表示中は更新不要
-  if (t - lastGpsUpdate < 0.5) return;
-  lastGpsUpdate = t;
+  if (nowT - lastGpsUpdate < 0.5) return;
+  lastGpsUpdate = nowT;
   const { lat, lon } = xzToLatLon(player.position.x, player.position.z);
   const latStr = lat.toFixed(5), lonStr = lon.toFixed(5);
   // 標高: 地表のゲーム高さ(getGroundY)を実標高(m)へ逆算(= elevBase + h/ELEV_SCALE)
@@ -699,14 +702,6 @@ if (langJaBtn) langJaBtn.addEventListener('click', (e) => { e.stopPropagation();
 if (langEnBtn) langEnBtn.addEventListener('click', (e) => { e.stopPropagation(); setLang('en'); });
 updateLangButtons();
 
-// ======= 初期化: 保存済み言語(iseharaLang)をUI全体へ反映 =======
-// 【重要】ここまでに各所の初期描画(setViewMode(0)・refreshPerfLabel・updateCamDirBtn・
-// updateAltKeepBtn・refreshModeLabel等)は既にcurrentLang(part1.js冒頭でlocalStorageから
-// 読み込み済み)を踏まえてt()経由で描画されているが、index.html側にdata-i18n属性で
-// マークした静的テキストはまだ日本語のままDOMに残っている。他の初期状態セットと同じ
-// タイミングでapplyI18n()を1回呼び、保存言語が'en'の場合でも起動直後から正しく英語表示にする。
-applyI18n();
-
 // ======= 操作ヘルプ: 初回のみ自動表示、以後は?ボタンから =======
 const helpModal = document.getElementById('helpModal');
 const helpBtn = document.getElementById('helpBtn');
@@ -977,3 +972,12 @@ function floorHeightAt(x, z, fromY) {
   }
   return fy;
 }
+
+// ======= 初期化: 保存済み言語(iseharaLang)をUI全体へ反映 =======
+// 【重要】applyI18n()はupdateAltKeepBtn等の状態依存関数を呼ぶため、それらが参照する
+// const(altKeepBtn等)やこのファイル内の全ての宣言が実行済みになった後、
+// つまりpart7.js内の本当に最後でなければならない(以前ファイル中間に置いていたところ、
+// 後方のconst altKeepBtn等がまだ未初期化のままTDZ参照エラーで例外になり、それ以降の
+// touch controls/collision設定(joyActive・playerRadius等)が一切実行されず
+// 「起動直後に何も操作できなくなる」重大バグを引き起こしていた・2026-07-23修正)。
+applyI18n();
