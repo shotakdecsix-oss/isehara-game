@@ -774,6 +774,10 @@ const BUILDING_UNLOAD_DIST_REAL = PERF.bUnloadReal;
 const BUILDING_GEN_DIST_PROC = 1000;
 const BUILDING_UNLOAD_DIST_PROC = 1800;
 let _buildingUnloadFrame = 0;
+// 【2026-07-21・Fable5診断】eviction(このすぐ下)が直近で実際に適用した実建物の保持距離。
+// reactivateNearbyDormantBuildings側がこれを参照してマージン(境界の緩衝帯)を作る
+// (evict/revive境界のチャタリング防止。詳細はreactivateNearbyDormantBuildings参照)。
+let _lastRealKeepDist = BUILDING_UNLOAD_DIST_REAL;
 // force=true: 90フレーム周期を待たず即座に判定する(「今すぐ整理」ボタン用。CODE_REVIEW P8関連)
 function unloadFarBuildings(force) {
   _buildingUnloadFrame++;
@@ -796,8 +800,10 @@ function unloadFarBuildings(force) {
   if (_nearCap) {
     const BIN = 100, NBIN = 40; // 100m刻み×4km
     const hist = new Array(NBIN).fill(0);
+    let realTotal = 0, procTotal = 0;
     for (const rec of buildingRecords) {
-      if (!rec.real) continue;
+      if (!rec.real) { procTotal++; continue; }
+      realTotal++;
       const dx = rec.x - px, dz = rec.z - pz;
       // 高層(40m超)は距離を1.6で割って「近い扱い」にし、選別で生き残りやすくする
       // (上限到達で保持半径が縮んでも、遠景のスカイラインが丸ごと消えないように)
@@ -805,12 +811,23 @@ function unloadFarBuildings(force) {
       const bi = Math.min(NBIN - 1, (dist / BIN) | 0);
       hist[bi]++;
     }
+    // 【2026-07-21・Fable5診断・修正6】以前はtarget=PERF.bMax*0.85(=総数基準)だったが、
+    // histは実建物しか数えていない。密集地でも実建物数がtarget未満の場合(手続き生成建物が
+    // 総数の一部を占めるケース)、累積(acc)が一度もtargetへ到達できずcutoff=NBIN固定
+    // (=このヒストグラム縮小自体が完全に空振り)になっていた。上限到達中でも実質的な
+    // eviction(枠の解放)が一切発生せず、reactivateNearbyDormantBuildings側は855行目の
+    // ガードで動かないため、dormantBuildingsが際限なく積み上がる片道弁の直接原因になっていた
+    // (実機ログでrecords 12000/12000に張り付いたままdormantが11万件超まで増加して確認)。
+    // 実建物のみのヒストグラムには実建物基準のtargetを使う: 「全体の85%からプロシージャル
+    // 建物ぶんを差し引いた、実建物が占めてよい席数」。procTotalは他の距離カットオフ
+    // (BUILDING_UNLOAD_DIST_PROC)で別途管理されるためここでは触らない。
+    const target = Math.max(0, PERF.bMax * 0.85 - procTotal);
     let acc = 0, cutoff = NBIN;
-    const target = PERF.bMax * 0.85;
     for (let i = 0; i < NBIN; i++) { acc += hist[i]; if (acc >= target) { cutoff = i + 1; break; } }
     const cutR = cutoff * BIN;
     if (cutR * cutR < d2Real) d2Real = cutR * cutR;
   }
+  _lastRealKeepDist = Math.sqrt(d2Real); // reactivateNearbyDormantBuildings側のマージン計算用
   const d2Proc = BUILDING_UNLOAD_DIST_PROC * BUILDING_UNLOAD_DIST_PROC;
   const removeIds = new Set();
   // 【2026-07-17・P3】以前はここでbuildingRecordsを直接spliceしていたが、削除の6点セットを
@@ -854,14 +871,33 @@ function reactivateNearbyDormantBuildings() {
   // 総数上限(PERF.bMax)到達中は復帰させない(復帰→上限で即dormant戻しの空回り防止)
   if (buildingRecords.length >= PERF.bMax) return;
   const px = player.position.x, pz = player.position.z;
-  const d2Real = BUILDING_GEN_DIST_REAL * BUILDING_GEN_DIST_REAL;
+  // 【2026-07-21・Fable5診断】上限付近(unloadFarBuildings側の_nearCap判定と同じ閾値)では、
+  // evictionが直近で実際に適用した保持距離(_lastRealKeepDist、修正6のヒストグラム縮小後の
+  // 値)の80%までしか復帰させない。同じ90フレーム周期でevict/reviveを別々に判定しているため、
+  // 両者が同じ境界(例: 生成距離ぎりぎり)を使うと、境界付近の建物が解放→復帰→解放…を
+  // 往復するチャーン(クラッシュ調査で問題になったのと同種の無駄なgeometry再生成)を
+  // 起こしうる。マージンを設けて緩衝帯を作る。上限に余裕がある通常時は従来通り生成距離まで。
+  const _nearCapNow = buildingRecords.length >= PERF.bMax * 0.95;
+  const _realRevLim = _nearCapNow ? Math.min(BUILDING_GEN_DIST_REAL, _lastRealKeepDist * 0.8) : BUILDING_GEN_DIST_REAL;
+  const d2Real = _realRevLim * _realRevLim;
   const d2Proc = BUILDING_GEN_DIST_PROC * BUILDING_GEN_DIST_PROC;
-  for (let i = dormantBuildings.length - 1; i >= 0; i--) {
+  // 【2026-07-21・Fable5診断】上限到達状態が解けた直後、生成距離内のdormantが密集地では
+  // 数万件規模になりうる。1パスで全件pendingBuildingsへ流し込むと、そのフレームだけ
+  // ソート・生成コストが跳ね上がる懸念があるため、1サイクルあたりの復帰件数に上限を設け、
+  // 残りは次回(~1.5秒後)以降に持ち越す(近い順の優先はpendingBuildings側の並び替えが担う)。
+  const REVIVE_BUDGET = 200;
+  let revived = 0;
+  for (let i = dormantBuildings.length - 1; i >= 0 && revived < REVIVE_BUDGET; i--) {
     const b = dormantBuildings[i];
     const dx = b.x - px, dz = b.z - pz;
-    if (dx * dx + dz * dz <= (b.real ? d2Real : d2Proc)) {
+    let dd = dx * dx + dz * dz;
+    // 【2026-07-21・Fable5診断】unloadFarBuildingsの高層優遇(÷1.6、距離の2乗なので÷2.56)と
+    // 評価基準を揃える。揃っていないと高層建物だけevict/revive境界がずれてチャーンしうる。
+    if (b.real && b.h > 40) dd /= 2.56;
+    if (dd <= (b.real ? d2Real : d2Proc)) {
       dormantBuildings.splice(i, 1);
       pendingBuildings.push(b);
+      revived++;
     }
   }
 }
