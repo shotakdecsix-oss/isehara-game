@@ -100,7 +100,7 @@ async function loadWideTerrain(centerX = 0, centerZ = 0) {
   if (wideLoading) return;
   wideLoading = true;
   const reCenter = (wideElev !== null); // 2回目以降(=別地域へ移動しての取り直し)
-  if (reCenter) showToast('🏔 この地域の地形を取得中...', { sticky: true });
+  if (reCenter) showToast(t('terrainLoadingRegion'), { sticky: true });
   const pts = [];
   for (let iz = 0; iz < WIDE_SEGS1; iz++)
     for (let ix = 0; ix < WIDE_SEGS1; ix++) {
@@ -156,7 +156,7 @@ async function loadWideTerrain(centerX = 0, centerZ = 0) {
   // 残っていた。地形データそのものが更新された今この瞬間に呼び直せば、移動を待たず
   // 即座に正しい高さへ生え直す。
   if (typeof rebuildForest === 'function') rebuildForest();
-  if (reCenter) showToast('🏔 地形反映完了', { duration: 2500 });
+  if (reCenter) showToast(t('terrainApplied'), { duration: 2500 });
 }
 
 // 遠景(FAR)取得に失敗するたびに呼ぶ。checkNearTerrainのonNearTerrainFailと同じ考え方で、
@@ -175,12 +175,12 @@ function onWideTerrainFail() {
   _wideFailCount++;
   if (_wideFailCount === 3) { // 数回続けて失敗した時だけ知らせる(単発の通信エラーではうるさくしない)
     console.warn('[遠景地形] 取得に失敗しています(' + _wideFailCount + '回目)。取得できるまで自動で再試行します。');
-    showToast('⚠️ 遠景の地形取得に失敗しています(自動で再試行中)', { duration: 3000 });
+    showToast(t('terrainFarFailRetry'), { duration: 3000 });
   }
   if (_wideFailCount >= 6 && !_wideGiveUp) {
     _wideGiveUp = true;
     console.warn('[遠景地形] 取得を諦めました。平坦な遠景のまま続行します(標高APIの日次上限到達等が原因の可能性)。');
-    showToast('⚠️ 遠景データを取得できません(平坦な遠景のまま続行します)', { duration: 4000 });
+    showToast(t('terrainFarGiveUp'), { duration: 4000 });
   }
 }
 
@@ -451,7 +451,7 @@ async function loadOSM() {
   // 国別プロファイル(denseHighRise等)が二度と効かなくなる(実機検証: ニューヨークの都心が
   // 低層住宅だらけになる原因の一つ)。スロットルを待たず即座に取得を開始し、最大1.5秒だけ
   // 完了を待つ(ブロッキングは短時間に限定し、Nominatim不調時は諦めて先に進む)。
-  showToast('🗺 マップを読み込み中...', { sticky: true });
+  showToast(t('mapLoadingToast'), { sticky: true });
   awaitingDestinationLoad = true;
   await Promise.race([
     updateAddressDisplay(),

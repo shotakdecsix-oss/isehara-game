@@ -36,7 +36,7 @@ async function updateAddressDisplay() {
     const city = a.city || a.town || a.village || a.county || '';
     const area = a.suburb || a.neighbourhood || a.quarter || a.city_district || '';
     const text = [city, area].filter(Boolean).join('');
-    if (addressEl) addressEl.textContent = text ? `📍 ${text}` : '📍 (住所不明)';
+    if (addressEl) addressEl.textContent = text ? `📍 ${text}` : t('addrUnknown');
     // Nominatimは香港・マカオを国コード的には"cn"として返す(ISO3166-2の副行政区画で
     // "CN-HK"/"CN-MO"と区別している)。country_codeだけを見ると香港が中国本土と同じ
     // 扱いになり建物スタイルの見分けがつかないため、この副行政区画コードを優先する。
@@ -167,7 +167,7 @@ function renderJumpHistory() {
     b.addEventListener('click', (e) => {
       e.stopPropagation();
       mapSearchInput.value = h.name;
-      mapHintEl.textContent = '📍 ' + h.name + ' へジャンプ！';
+      mapHintEl.textContent = t('mapHintJumpTo', { name: h.name });
       jumpToLatLon(h.lat, h.lon);
     });
     mapSearchHistoryEl.appendChild(b);
@@ -176,14 +176,16 @@ function renderJumpHistory() {
 
 function openMapJump() {
   mapOverlay.classList.add('active');
-  mapHintEl.textContent = 'タップした場所にジャンプします';
+  mapHintEl.textContent = t('mapHintDefault');
   renderJumpHistory(); // 開くたびに最新の履歴を反映(他タブでの追加等にも追従)
   const { lat, lon } = xzToLatLon(player.position.x, player.position.z);
 
   if (!leafletMap) {
     leafletMap = L.map('leafletMap').setView([lat, lon], 16);
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      attribution: '© OpenStreetMap'
+    // 【2026-07-22追加】通常のOSMタイルは各国のローカル言語表記になり判読困難な場合があるため、
+    // Wikimedia提供のosm-intlスタイル(lang=jaで日本語優先表示、世界中カバー)に切り替え。
+    L.tileLayer('https://maps.wikimedia.org/osm-intl/{z}/{x}/{y}.png?lang=ja', {
+      attribution: '© OpenStreetMap contributors, Wikimedia'
     }).addTo(leafletMap);
 
     // Player marker
@@ -221,7 +223,7 @@ const mapSearchInput = document.getElementById('mapSearchInput');
 async function searchPlaceJump() {
   const q = mapSearchInput.value.trim();
   if (!q) return;
-  mapHintEl.textContent = '🔎 「' + q + '」を検索中...';
+  mapHintEl.textContent = t('mapHintSearching', { q });
   let lat = null, lon = null, name = '';
   try {
     const res = await fetch('https://msearch.gsi.go.jp/address-search/AddressSearch?q=' + encodeURIComponent(q));
@@ -256,10 +258,10 @@ async function searchPlaceJump() {
     } catch (e) {}
   }
   if (lat === null || !isFinite(lat) || !isFinite(lon)) {
-    mapHintEl.textContent = '⚠️ 「' + q + '」が見つかりませんでした';
+    mapHintEl.textContent = t('mapHintNotFound', { q });
     return;
   }
-  mapHintEl.textContent = '📍 ' + name + ' へジャンプ！';
+  mapHintEl.textContent = t('mapHintJumpTo', { name });
   // 【重要】jumpToLatLonは遠距離ジャンプだとlocation.reload()を呼ぶため、その前に
   // 履歴の保存(同期的なlocalStorage書き込み)を済ませておく(呼んだ後だと実行が
   // 打ち切られる可能性がある)。
@@ -277,22 +279,22 @@ mapSearchInput.addEventListener('keyup', e => e.stopPropagation());
 // Geolocation API は HTTPS(secure context)必須。LANのhttpアクセスでは使えない旨を案内する
 document.getElementById('geoBtn').addEventListener('click', () => {
   if (!('geolocation' in navigator)) {
-    mapHintEl.textContent = '⚠️ この端末・ブラウザは位置情報に対応していません';
+    mapHintEl.textContent = t('mapHintGeoUnsupported');
     return;
   }
   if (!window.isSecureContext) {
-    mapHintEl.textContent = '⚠️ 位置情報はHTTPS接続でのみ使えます(http://192.168.…などLAN経由では不可。Render等のhttps版でお試しを)';
+    mapHintEl.textContent = t('mapHintGeoHttpsOnly');
     return;
   }
-  mapHintEl.textContent = '📡 現在地を取得中...';
+  mapHintEl.textContent = t('mapHintGeoFetching');
   navigator.geolocation.getCurrentPosition(
     p => {
-      mapHintEl.textContent = '📍 現在地へジャンプ！';
+      mapHintEl.textContent = t('mapHintGeoJump');
       jumpToLatLon(p.coords.latitude, p.coords.longitude);
     },
     err => {
-      mapHintEl.textContent = '⚠️ 現在地を取得できませんでした(' +
-        (err.code === 1 ? '位置情報の利用が許可されていません' : err.message) + ')';
+      mapHintEl.textContent = t('mapHintGeoFailed',
+        { reason: err.code === 1 ? t('geoPermissionDenied') : err.message });
     },
     { enableHighAccuracy: true, timeout: 10000 });
 });
@@ -306,7 +308,7 @@ function updateGPS(t) {
   // 標高: 地表のゲーム高さ(getGroundY)を実標高(m)へ逆算(= elevBase + h/ELEV_SCALE)
   const elevM = Math.round(elevBase + getGroundY(player.position.x, player.position.z) / ELEV_SCALE);
   gpsEl.href = `https://www.google.com/maps?q=${latStr},${lonStr}&z=17`;
-  gpsEl.innerHTML = `📍 ${latStr}, ${lonStr}<br>⛰ 標高 ${elevM}m<br>🗺 Googleマップで開く`;
+  gpsEl.innerHTML = `📍 ${latStr}, ${lonStr}<br>⛰ ${t('gpsElevation', { elev: elevM })}<br>🗺 ${t('gpsOpenGoogleMaps')}`;
   if (leafletMap && playerMarker) playerMarker.setLatLng([lat, lon]);
 }
 
@@ -355,16 +357,27 @@ const camDist = 15, camHeight = 8; // meters
 // いる)と先頭2つの順序が入れ替わっていた。起動直後(viewMode=0=本来は三人称)なのに
 // ラベルが「一人称」と表示され、1回切り替えて実際に一人称(viewMode=1)になると今度は
 // 「三人称」と表示される、という実際のカメラと真逆のモード名が出る不具合になっていた。
-const viewBtnLabels = ['👁 三人称', '👁 一人称', '🗺 上空'];
+// 【2026-07-22】絵文字+i18nキーに分解(UI言語切替対応)。絵文字は言語に関わらず固定。
+const VIEW_MODE_META = [
+  { icon: '👁', key: 'viewThird' },
+  { icon: '👁', key: 'viewFirst' },
+  { icon: '🗺', key: 'viewTop' },
+];
+// 現在のviewModeに応じたviewBtnのアイコン・ラベルを再描画する(言語切替時にも
+// applyI18n()から呼ばれる。「今まさに画面に表示されている」状態依存ラベルのため)。
+function refreshViewLabel() {
+  const meta = VIEW_MODE_META[viewMode];
+  const icoEl = document.getElementById('viewIco'), subEl = document.getElementById('viewSub');
+  if (icoEl) icoEl.textContent = meta.icon;
+  if (subEl) subEl.textContent = t(meta.key);
+}
 
 // 【2026-07-21】上空視点専用の🗺(旧mapBtn)を撤去し、視点切替1ボタンに統合したのに伴い、
 // 「もう一方のボタンをactiveにする」ための分岐も不要になった(常にこのボタン自身が
 // 現在のモードを示す)。
 function setViewMode(mode) {
   viewMode = mode % 3;
-  const [icoText, ...labelParts] = viewBtnLabels[viewMode].split(' ');
-  document.getElementById('viewIco').textContent = icoText;
-  document.getElementById('viewSub').textContent = labelParts.join(' ');
+  refreshViewLabel();
   const showBody = (viewMode !== 1); // hide body in first-person
   body.visible = leftArm.visible = rightArm.visible =
   head.visible = leftLeg.visible = rightLeg.visible =
@@ -524,7 +537,7 @@ try { if (localStorage.getItem('iseharaCamDir') === 'legacy') CAM_DIR = -1; } ca
 const camDirBtn = document.getElementById('camDirBtn');
 const camDirLabel = document.getElementById('camDirLabel');
 function updateCamDirBtn() {
-  if (camDirLabel) camDirLabel.textContent = CAM_DIR === 1 ? '標準' : '反転';
+  if (camDirLabel) camDirLabel.textContent = CAM_DIR === 1 ? t('camDirStandard') : t('camDirInverted');
   camDirBtn.classList.toggle('active', CAM_DIR === -1);
 }
 camDirBtn.addEventListener('click', (e) => {
@@ -575,7 +588,10 @@ document.addEventListener('click', () => {
 // ======= 時間帯(パネル内、⚙で開閉) =======
 // 朝/昼/夕/夜を手動で固定表示できる(part1.js setTimeOverride参照)。
 // 建物が紫っぽく見える件の切り分け用に、昼固定で見た目を確認できるようにする狙いもある。
-const TIME_LABELS = { auto: '自動', morning: '朝', noon: '昼', evening: '夕', night: '夜' };
+// 【2026-07-22】現状このアプリ内では未参照(将来的なサブラベル表示用に温存)だが、
+// UI言語切替対応としてハードコードの日本語からi18nキー経由に置き換えておく。
+const TIME_LABEL_KEYS = { auto: 'timeAutoSub', morning: 'timeMorningSub', noon: 'timeNoonSub', evening: 'timeEveningSub', night: 'timeNightSub' };
+function timeSubLabel(sel) { return t(TIME_LABEL_KEYS[sel]) || sel; }
 const TIME_OVERRIDE_H2 = { night: 0, morning: 6, noon: 12, evening: 18 };
 {
   let curTimeSel = 'auto';
@@ -599,10 +615,15 @@ const TIME_OVERRIDE_H2 = { night: 0, morning: 6, noon: 12, evening: 18 };
 // 距離系はconstで各所に焼き込まれるため、モード切替と同じ「保存してリロード」方式)。
 const perfBtn = document.getElementById('perfBtn');
 const perfCtrlEl = document.getElementById('perfCtrl');
-const PERF_LABELS = { lite: '軽量', std: '標準', high: '高品質' };
-if (perfBtn && perfCtrlEl) {
+const PERF_LABEL_KEYS = { lite: 'perfLiteSub', std: 'perfStdSub', high: 'perfHighSub' };
+// 現在のPERF_PRESETに応じたperfBtnのsubラベルを再描画する(言語切替時にもapplyI18n()
+// から呼ばれる。「今まさに画面に表示されている」状態依存ラベルのため)。
+function refreshPerfLabel() {
   const sub = document.getElementById('perfSub');
-  if (sub) sub.textContent = PERF_LABELS[PERF_PRESET] || '標準';
+  if (sub) sub.textContent = t(PERF_LABEL_KEYS[PERF_PRESET] || 'perfStdSub');
+}
+if (perfBtn && perfCtrlEl) {
+  refreshPerfLabel();
   // 【2026-07-17】data-preset付きボタンだけに限定(下の「今すぐ整理」ボタンは
   // 同じ.charRow内だがpreset切替ではないため、誤ってリロード処理に巻き込まれないように)。
   perfCtrlEl.querySelectorAll('.charRow button[data-preset]').forEach((b) => {
@@ -643,7 +664,7 @@ if (cleanupNowBtn) {
     unloadFarAreaPolys(true);
     osmTileFailCount.clear(); // タイル再試行カウンタ(距離に関係ないブックキーピング)もリセット
     const after = renderer.info.memory.geometries;
-    showToast(`🧹 現在地周辺以外を整理しました(ジオメトリ ${before} → ${after})`);
+    showToast(t('cleanupDoneToast', { before, after }));
   });
 }
 
@@ -665,6 +686,27 @@ if (debugTileBtn) {
 document.getElementById('charBoyBtn').addEventListener('click', (e) => { e.stopPropagation(); setCharacterSex('boy'); });
 document.getElementById('charGirlBtn').addEventListener('click', (e) => { e.stopPropagation(); setCharacterSex('girl'); });
 
+// ======= UI言語切替(パネル内、⚙で開閉) =======
+// 【2026-07-22】ユーザー要望: 設定の中で日本語⇔英語を切り替えられるようにする。
+// charBoyBtn/charGirlBtnと同じトグルボタンペアのパターン(選択中は.active)を踏襲する。
+const langJaBtn = document.getElementById('langJaBtn');
+const langEnBtn = document.getElementById('langEnBtn');
+function updateLangButtons() {
+  if (langJaBtn) langJaBtn.classList.toggle('active', currentLang === 'ja');
+  if (langEnBtn) langEnBtn.classList.toggle('active', currentLang === 'en');
+}
+if (langJaBtn) langJaBtn.addEventListener('click', (e) => { e.stopPropagation(); setLang('ja'); });
+if (langEnBtn) langEnBtn.addEventListener('click', (e) => { e.stopPropagation(); setLang('en'); });
+updateLangButtons();
+
+// ======= 初期化: 保存済み言語(iseharaLang)をUI全体へ反映 =======
+// 【重要】ここまでに各所の初期描画(setViewMode(0)・refreshPerfLabel・updateCamDirBtn・
+// updateAltKeepBtn・refreshModeLabel等)は既にcurrentLang(part1.js冒頭でlocalStorageから
+// 読み込み済み)を踏まえてt()経由で描画されているが、index.html側にdata-i18n属性で
+// マークした静的テキストはまだ日本語のままDOMに残っている。他の初期状態セットと同じ
+// タイミングでapplyI18n()を1回呼び、保存言語が'en'の場合でも起動直後から正しく英語表示にする。
+applyI18n();
+
 // ======= 操作ヘルプ: 初回のみ自動表示、以後は?ボタンから =======
 const helpModal = document.getElementById('helpModal');
 const helpBtn = document.getElementById('helpBtn');
@@ -677,26 +719,29 @@ if (infoCloseBtn) infoCloseBtn.addEventListener('click', (e) => { e.stopPropagat
 // デプロイ日時の表示。server.js が index.html 配信時に window.__DEPLOY_INFO__ を注入する
 // (Renderはデプロイのたびにプロセスを再起動するため、サーバ起動時刻=デプロイ日時として使える)。
 // index.htmlをサーバ経由でなく直接開いた場合は注入されないため、その場合はその旨を表示する。
-(() => {
+// 【2026-07-22】ヘルプモーダルは開いている間「今まさに画面に表示されている」文言なので、
+// UI言語切替時にも再描画できるよう関数化してapplyI18n()から呼べるようにする。
+function refreshDeployInfo() {
   const el = document.getElementById('deployInfo');
   if (!el) return;
   const info = window.__DEPLOY_INFO__;
   if (!info || !info.time) {
-    el.textContent = 'デプロイ日時: 取得できません(サーバ経由で開いてください)';
+    el.textContent = t('deployInfoUnavailable');
     return;
   }
-  const fmt = (iso) => new Date(iso).toLocaleString('ja-JP', {
+  const fmt = (iso) => new Date(iso).toLocaleString(currentLang === 'en' ? 'en-US' : 'ja-JP', {
     timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit',
     hour: '2-digit', minute: '2-digit',
   });
-  let txt = `🚀 デプロイ日時: ${fmt(info.time)}`;
+  let txt = t('deployInfoLine', { time: fmt(info.time) });
   if (info.commit) {
     txt += ` (${info.commit}`;
-    if (info.commitTime) txt += `, コミット: ${fmt(info.commitTime)}`;
+    if (info.commitTime) txt += t('deployInfoCommitSuffix', { time: fmt(info.commitTime) });
     txt += ')';
   }
   el.textContent = txt;
-})();
+}
+refreshDeployInfo();
 
 try {
   if (!localStorage.getItem('iseharaHelpSeen')) {
@@ -742,7 +787,7 @@ const altKeepBtn = document.getElementById('altKeepBtn');
 function updateAltKeepBtn() {
   if (!altKeepBtn) return;
   altKeepBtn.textContent = altLocked ? '🔒' : '🔓';
-  altKeepBtn.title = altLocked ? '高度キープ中(タップで解除)' : '高度キープ(空中でタップ)';
+  altKeepBtn.title = altLocked ? t('altKeepTitleOn') : t('altKeepTitleOff');
   altKeepBtn.classList.toggle('active', altLocked);
 }
 function setAltLocked(v) {

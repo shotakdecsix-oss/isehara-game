@@ -256,7 +256,7 @@ body.uiHidden #uiToggleBtn { opacity:0.45; }
 <div id="waterOverlay"></div>
 
 <!-- 上中央: ロケーションカプセル(タップでGPS座標・標高を展開) -->
-<div id="addressDisplay" class="glass">📍 現在地を取得中...</div>
+<div id="addressDisplay" class="glass" data-i18n="addrLoading">📍 現在地を取得中...</div>
 <a id="gpsDisplay" class="glass" href="#" target="_blank">📍 座標取得中...</a>
 
 <!-- 左: アイコンレール -->
@@ -264,78 +264,88 @@ body.uiHidden #uiToggleBtn { opacity:0.45; }
   <!-- 2026-07-21: 上空視点専用の🗺(旧mapBtn)を撤去し、視点切替ボタン1つに統合(機能が
        完全に重複していた。viewBtnの巡回に上空も含まれているため、現在のモード名は
        常にこのボタンのsubラベルで確認できる) -->
-  <button class="railBtn glass hasSub" id="viewBtn" title="視点切替(三人称→一人称→上空)"><span class="ico" id="viewIco">👁</span><span class="sub" id="viewSub">一人称</span></button>
-  <button class="railBtn glass" id="jumpBtn" title="マップジャンプ">📍</button>
-  <button class="railBtn glass hasSub" id="modeBtn" title="時代モード"><span class="ico" id="modeIco">🏙</span><span class="sub" id="modeSub">現実</span></button>
+  <button class="railBtn glass hasSub" id="viewBtn" title="視点切替(三人称→一人称→上空)" data-i18n-title="viewBtnTitle"><span class="ico" id="viewIco">👁</span><span class="sub" id="viewSub">一人称</span></button>
+  <button class="railBtn glass" id="jumpBtn" title="マップジャンプ" data-i18n-title="jumpBtnTitle">📍</button>
+  <button class="railBtn glass hasSub" id="modeBtn" title="時代モード" data-i18n-title="modeBtnTitle"><span class="ico" id="modeIco">🏙</span><span class="sub" id="modeSub">現実</span></button>
   <!-- 2026-07-21: 海面(🌊)/時間帯(🕐)/キャラクター選択(🧍)/視点回転(🔄)の個別アイコンを
        廃止し、設定(⚙)1つに統合(ユーザー要望)。中身は下の#perfCtrlパネル内へ移動。 -->
-  <button class="railBtn glass hasSub" id="perfBtn" title="設定(描写・海面・時間帯・キャラクター・視点)"><span class="ico">⚙</span><span class="sub" id="perfSub">標準</span></button>
-  <button class="railBtn glass" id="helpBtn" title="操作ヘルプ">?</button>
+  <button class="railBtn glass hasSub" id="perfBtn" title="設定(描写・海面・時間帯・キャラクター・視点)" data-i18n-title="perfBtnTitle"><span class="ico">⚙</span><span class="sub" id="perfSub">標準</span></button>
+  <button class="railBtn glass" id="helpBtn" title="操作ヘルプ" data-i18n-title="helpBtnTitle">?</button>
 </nav>
 
 <!-- 設定ポップオーバー(⚙タップで開閉。描写・海面・時間帯・キャラクター・視点回転を統合) -->
 <div id="perfCtrl" class="glass">
   <div class="settingsSection">
-    ⚙ 描写範囲・負荷(変更すると再読み込みします)
+    <span data-i18n="perfSectionTitle">⚙ 描写範囲・負荷(変更すると再読み込みします)</span>
     <div class="charRow">
-      <button id="perfLiteBtn" data-preset="lite">🌱 軽量</button>
-      <button id="perfStdBtn" data-preset="std">⚖️ 標準</button>
-      <button id="perfHighBtn" data-preset="high">🏙 高品質</button>
+      <button id="perfLiteBtn" data-preset="lite" data-i18n="perfLite">🌱 軽量</button>
+      <button id="perfStdBtn" data-preset="std" data-i18n="perfStd">⚖️ 標準</button>
+      <button id="perfHighBtn" data-preset="high" data-i18n="perfHigh">🏙 高品質</button>
     </div>
-    <div id="perfDesc">軽量: 建物1.4km/低負荷(スマホ向け)<br>標準: 建物2.2km<br>高品質: 建物4.2km/先読み拡大(高性能PC向け・メモリ大)</div>
+    <div id="perfDesc" data-i18n-html="perfDesc1">軽量: 建物1.4km/低負荷(スマホ向け)<br>標準: 建物2.2km<br>高品質: 建物4.2km/先読み拡大(高性能PC向け・メモリ大)</div>
     <div class="charRow">
-      <button id="cleanupNowBtn">🧹 今すぐ整理</button>
+      <button id="cleanupNowBtn" data-i18n="cleanupNowBtn">🧹 今すぐ整理</button>
     </div>
-    <div id="perfDesc">現在地周辺以外の道路・建物・公園/水面等のGPUメッシュを解放します(記録は残るので再訪すれば元通り。長時間プレイで重くなってきたら押してください)</div>
+    <div id="perfDesc" data-i18n="cleanupDesc">現在地周辺以外の道路・建物・公園/水面等のGPUメッシュを解放します(記録は残るので再訪すれば元通り。長時間プレイで重くなってきたら押してください)</div>
     <div class="charRow">
-      <button id="debugTileBtn">🩺 タイル状況</button>
+      <button id="debugTileBtn" data-i18n="debugTileBtn">🩺 タイル状況</button>
     </div>
-    <div id="perfDesc">デバッグ用: 周囲のOSMタイルごとの取得・生成状況を色分け表示します(灰=未取得 赤=取得中 青=地形待ち 橙=生成中 緑=完了)</div>
+    <div id="perfDesc" data-i18n="debugTileDesc">デバッグ用: 周囲のOSMタイルごとの取得・生成状況を色分け表示します(灰=未取得 赤=取得中 青=地形待ち 橙=生成中 緑=完了)</div>
   </div>
 
   <div class="settingsSection">
-    🌊 海面の高さ <span id="seaVal">3.0</span>m
+    <span data-i18n="seaLevelLabel">🌊 海面の高さ</span> <span id="seaVal">3.0</span>m
     <input id="seaSlider" type="range" min="-10" max="10" step="0.5" value="3">
   </div>
 
   <div class="settingsSection">
-    🕐 時間帯(手動固定)
+    <span data-i18n="timeSectionTitle">🕐 時間帯(手動固定)</span>
     <div class="charRow">
-      <button id="timeAutoBtn" data-time="auto">🕐 自動</button>
-      <button id="timeMorningBtn" data-time="morning">🌅 朝</button>
+      <button id="timeAutoBtn" data-time="auto" data-i18n="timeAuto">🕐 自動</button>
+      <button id="timeMorningBtn" data-time="morning" data-i18n="timeMorning">🌅 朝</button>
     </div>
     <div class="charRow">
-      <button id="timeNoonBtn" data-time="noon">☀️ 昼</button>
-      <button id="timeEveningBtn" data-time="evening">🌇 夕</button>
-      <button id="timeNightBtn" data-time="night">🌙 夜</button>
+      <button id="timeNoonBtn" data-time="noon" data-i18n="timeNoon">☀️ 昼</button>
+      <button id="timeEveningBtn" data-time="evening" data-i18n="timeEvening">🌇 夕</button>
+      <button id="timeNightBtn" data-time="night" data-i18n="timeNight">🌙 夜</button>
     </div>
-    <div id="perfDesc">昼に固定して建物の色を確認できます(紫っぽく見える場合の切り分けに)</div>
+    <div id="perfDesc" data-i18n="timeDesc">昼に固定して建物の色を確認できます(紫っぽく見える場合の切り分けに)</div>
   </div>
 
   <div class="settingsSection">
-    🧍 キャラクター
+    <span data-i18n="charSectionTitle">🧍 キャラクター</span>
     <div class="charRow">
-      <button id="charBoyBtn" data-sex="boy">👦 少年</button>
-      <button id="charGirlBtn" data-sex="girl">👧 少女</button>
+      <button id="charBoyBtn" data-sex="boy" data-i18n="charBoy">👦 少年</button>
+      <button id="charGirlBtn" data-sex="girl" data-i18n="charGirl">👧 少女</button>
     </div>
   </div>
 
   <div class="settingsSection">
-    🔄 視点回転の向き
+    <span data-i18n="camDirSectionTitle">🔄 視点回転の向き</span>
     <div class="charRow">
       <button id="camDirBtn">🔄 <span id="camDirLabel">標準</span></button>
     </div>
   </div>
+
+  <!-- 2026-07-22: UI言語切替(ユーザー要望)。charBoyBtn/charGirlBtnと同じトグルボタンの
+       見た目パターンを踏襲する。見出し自体は常に日英併記なのでdata-i18nは付けない。 -->
+  <div class="settingsSection">
+    🌐 言語 / Language
+    <div class="charRow">
+      <button id="langJaBtn" data-lang="ja">日本語</button>
+      <button id="langEnBtn" data-lang="en">English</button>
+    </div>
+  </div>
 </div>
 
-<button id="uiToggleBtn" class="glass" title="UI表示/非表示">🙈</button>
+<button id="uiToggleBtn" class="glass" title="UI表示/非表示" data-i18n-title="uiToggleTitle">🙈</button>
 <div id="credit" style="display:none; position:fixed; bottom:2px; left:8px; font-size:10px; color:rgba(255,255,255,0.65); z-index:30; pointer-events:all;"></div>
 <div id="mapOverlay">
-  <div id="mapHint">タップした場所にジャンプします</div>
+  <div id="mapHint" data-i18n="mapHintDefault">タップした場所にジャンプします</div>
   <div id="mapSearchRow">
-    <input id="mapSearchInput" type="text" placeholder="地名・住所・施設名で検索" autocomplete="off">
-    <button id="mapSearchBtn">🔎 検索</button>
-    <button id="geoBtn">📡 現在地</button>
+    <input id="mapSearchInput" type="text" placeholder="地名・住所・施設名で検索" autocomplete="off" data-i18n-placeholder="mapSearchPlaceholder">
+    <button id="mapSearchBtn" data-i18n="mapSearchBtnLabel">🔎 検索</button>
+    <button id="geoBtn" data-i18n="geoBtnLabel">📡 現在地</button>
   </div>
   <!-- 2026-07-21: 検索でジャンプした地名の履歴(ユーザー要望)。part7.jsが
        localStorageから読み込んでチップとして描画し、タップで再ジャンプする。 -->
@@ -347,18 +357,18 @@ body.uiHidden #uiToggleBtn { opacity:0.45; }
 <!-- 操作ヘルプ(初回のみ自動表示。以後は?ボタンから) -->
 <div id="helpModal">
   <div id="info" class="glass">
-    PC: WASD移動 / Shiftダッシュ / Spaceジャンプ / ドラッグ回転 / Cで高度キープ切替<br>
-    スマホ: 左スティック移動(倒すほど加速) / 右スワイプ回転 / ⤴ジャンプ / 🔓で高度キープ切替
+    <span data-i18n-html="helpBody">PC: WASD移動 / Shiftダッシュ / Spaceジャンプ / ドラッグ回転 / Cで高度キープ切替<br>
+    スマホ: 左スティック移動(倒すほど加速) / 右スワイプ回転 / ⤴ジャンプ / 🔓で高度キープ切替</span>
     <div id="deployInfo"></div>
-    <button id="infoCloseBtn">閉じる</button>
+    <button id="infoCloseBtn" data-i18n="closeBtn">閉じる</button>
   </div>
 </div>
 
-<div id="status" class="glass">🗺 伊勢原マップ読み込み中...</div>
-<div id="debugTileLegend" class="glass">🩺左から地形/道路線路/建物の3本<span style="background:#555555"></span>未取得<span style="background:#3388dd"></span>待ち<span style="background:#dd3333"></span>取得中<span style="background:#ffaa22"></span>生成中<span style="background:#33cc55"></span>完了<span style="background:#9b3fd4"></span>諦め(未着)</div>
+<div id="status" class="glass" data-i18n="statusInitial">🗺 伊勢原マップ読み込み中...</div>
+<div id="debugTileLegend" class="glass" data-i18n-html="debugLegendHtml">🩺左から地形/道路線路/建物の3本<span style="background:#555555"></span>未取得<span style="background:#3388dd"></span>待ち<span style="background:#dd3333"></span>取得中<span style="background:#ffaa22"></span>生成中<span style="background:#33cc55"></span>完了<span style="background:#9b3fd4"></span>諦め(未着)</div>
 <div id="minimap" class="glass"><canvas id="minimapCanvas" width="200" height="200"></canvas></div>
 <div id="joystick" class="glass"><div id="joystickKnob"></div></div>
-<button id="altKeepBtn" class="glass" title="高度キープ(空中でタップ)">🔓</button>
+<button id="altKeepBtn" class="glass" title="高度キープ(空中でタップ)" data-i18n-title="altKeepTitleOff">🔓</button>
 <button id="hopBtn" class="glass">⤴</button>
 
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>

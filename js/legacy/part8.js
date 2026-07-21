@@ -723,7 +723,7 @@ async function fetchOSMTileBatch() {
         // 揃え、隣接ブロックタイルも含めて揃ってから完了表示にする。
         if (awaitingDestinationLoad && osmTilesReadyAround(player.position.x, player.position.z, 64)) {
           awaitingDestinationLoad = false;
-          showToast('✨ マップを表示しました', { duration: 3000 });
+          showToast(t('mapShownToast'), { duration: 3000 });
         }
         clearTimeout(timeoutId);
         osmTileActiveCount--;
@@ -826,7 +826,7 @@ async function fetchOSMTileBatch() {
     // (osmTilesReadyAround・上のキャッシュヒット分岐と同じ)が揃った時点に揃える。
     if (awaitingDestinationLoad && osmTilesReadyAround(player.position.x, player.position.z, 64)) {
       awaitingDestinationLoad = false;
-      showToast('✨ マップを表示しました', { duration: 3000 });
+      showToast(t('mapShownToast'), { duration: 3000 });
     }
   } catch(e) {
     // 以前は3回失敗すると完全に諦めて二度と再試行しなかったため、Overpassが一時的に
@@ -872,7 +872,7 @@ async function fetchOSMTileBatch() {
     // 出しっぱなしにしない(Overpass不調が長引くと「🗺 マップを読み込み中...」が永久に残るため)。
     if (awaitingDestinationLoad && roadReadyTiles.has(ptKey)) {
       awaitingDestinationLoad = false;
-      showToast('⚠️ 地図取得が一部失敗しました(背景で再試行を続けます)', { duration: 4000 });
+      showToast(t('mapPartialFailToast'), { duration: 4000 });
     }
   } finally {
     clearTimeout(timeoutId); // 成功時に残ったタイマー自体の掃除(abort()は既に完了済みのfetchには無害)

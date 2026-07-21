@@ -4,6 +4,226 @@
  * ロジックの再編・命名整理は行っていない。読み込み順は元のコードと同一を維持する必要がある
  * (classic scriptなのでグローバルスコープを共有し、宣言順に依存しているため)。
  */
+// ======= UI言語(日本語⇔English)切替 =======
+// 【2026-07-22】設定パネルからUI言語を切り替えられるようにする(ユーザー要望)。
+// classic script(モジュールバンドラ不使用)で index.html の <script> タグ順に
+// 全part.jsがグローバルスコープを共有しているため、辞書・t()・setLang()・applyI18n()は
+// 最初に読み込まれるこのファイルの冒頭で定義し、他の全part.jsから素朴に参照できるようにする。
+// 絵文字は言語に関わらず視認性のため残す(辞書の値自体に絵文字を含めて持つ)。
+const I18N = {
+  ja: {
+    // ---- 静的UI(index.html) ----
+    addrLoading: '📍 現在地を取得中...',
+    addrUnknown: '📍 (住所不明)',
+    gpsLoading: '📍 座標取得中...',
+    viewBtnTitle: '視点切替(三人称→一人称→上空)',
+    viewThird: '👁 三人称',
+    viewFirst: '👁 一人称',
+    viewTop: '🗺 上空',
+    jumpBtnTitle: 'マップジャンプ',
+    modeBtnTitle: '時代モード',
+    modeReal: '🏙 現実',
+    modeMeiji: '🌾 明治',
+    modeEdo: '🏯 江戸',
+    modeMarchen: '🍭 メルヘン',
+    modeSpace: '🛸 宇宙',
+    perfBtnTitle: '設定(描写・海面・時間帯・キャラクター・視点)',
+    helpBtnTitle: '操作ヘルプ',
+    perfSectionTitle: '⚙ 描写範囲・負荷(変更すると再読み込みします)',
+    perfLite: '🌱 軽量',
+    perfStd: '⚖️ 標準',
+    perfHigh: '🏙 高品質',
+    perfLiteSub: '軽量',
+    perfStdSub: '標準',
+    perfHighSub: '高品質',
+    perfDesc1: '軽量: 建物1.4km/低負荷(スマホ向け)<br>標準: 建物2.2km<br>高品質: 建物4.2km/先読み拡大(高性能PC向け・メモリ大)',
+    cleanupNowBtn: '🧹 今すぐ整理',
+    cleanupDesc: '現在地周辺以外の道路・建物・公園/水面等のGPUメッシュを解放します(記録は残るので再訪すれば元通り。長時間プレイで重くなってきたら押してください)',
+    debugTileBtn: '🩺 タイル状況',
+    debugTileDesc: 'デバッグ用: 周囲のOSMタイルごとの取得・生成状況を色分け表示します(灰=未取得 赤=取得中 青=地形待ち 橙=生成中 緑=完了)',
+    seaLevelLabel: '🌊 海面の高さ',
+    timeSectionTitle: '🕐 時間帯(手動固定)',
+    timeAuto: '🕐 自動',
+    timeMorning: '🌅 朝',
+    timeNoon: '☀️ 昼',
+    timeEvening: '🌇 夕',
+    timeNight: '🌙 夜',
+    timeAutoSub: '自動',
+    timeMorningSub: '朝',
+    timeNoonSub: '昼',
+    timeEveningSub: '夕',
+    timeNightSub: '夜',
+    timeDesc: '昼に固定して建物の色を確認できます(紫っぽく見える場合の切り分けに)',
+    charSectionTitle: '🧍 キャラクター',
+    charBoy: '👦 少年',
+    charGirl: '👧 少女',
+    camDirSectionTitle: '🔄 視点回転の向き',
+    camDirStandard: '標準',
+    camDirInverted: '反転',
+    uiToggleTitle: 'UI表示/非表示',
+    mapHintDefault: 'タップした場所にジャンプします',
+    mapSearchPlaceholder: '地名・住所・施設名で検索',
+    mapSearchBtnLabel: '🔎 検索',
+    geoBtnLabel: '📡 現在地',
+    helpBody: 'PC: WASD移動 / Shiftダッシュ / Spaceジャンプ / ドラッグ回転 / Cで高度キープ切替<br>スマホ: 左スティック移動(倒すほど加速) / 右スワイプ回転 / ⤴ジャンプ / 🔓で高度キープ切替',
+    closeBtn: '閉じる',
+    statusInitial: '🗺 伊勢原マップ読み込み中...',
+    debugLegendHtml: '🩺左から地形/道路線路/建物の3本<span style="background:#555555"></span>未取得<span style="background:#3388dd"></span>待ち<span style="background:#dd3333"></span>取得中<span style="background:#ffaa22"></span>生成中<span style="background:#33cc55"></span>完了<span style="background:#9b3fd4"></span>諦め(未着)',
+    altKeepTitleOff: '高度キープ(空中でタップ)',
+    altKeepTitleOn: '高度キープ中(タップで解除)',
+    // ---- 動的メッセージ(part4/6/7/8.js) ----
+    mapHintJumpTo: '📍 {name} へジャンプ！',
+    mapHintSearching: '🔎 「{q}」を検索中...',
+    mapHintNotFound: '⚠️ 「{q}」が見つかりませんでした',
+    mapHintGeoUnsupported: '⚠️ この端末・ブラウザは位置情報に対応していません',
+    mapHintGeoHttpsOnly: '⚠️ 位置情報はHTTPS接続でのみ使えます(http://192.168.…などLAN経由では不可。Render等のhttps版でお試しを)',
+    mapHintGeoFetching: '📡 現在地を取得中...',
+    mapHintGeoJump: '📍 現在地へジャンプ！',
+    mapHintGeoFailed: '⚠️ 現在地を取得できませんでした({reason})',
+    geoPermissionDenied: '位置情報の利用が許可されていません',
+    gpsElevation: '標高 {elev}m',
+    gpsOpenGoogleMaps: 'Googleマップで開く',
+    meijiLanduseLabel: '明治期土地利用',
+    meijiLanduseEdoLabel: '明治期データを江戸期の近似として',
+    meijiLoadingToast: '{label}データ取得中...',
+    meijiLoadedToast: '{label} {count} 地点読込',
+    terrainLoadingRegion: '🏔 この地域の地形を取得中...',
+    terrainApplied: '🏔 地形反映完了',
+    terrainFarFailRetry: '⚠️ 遠景の地形取得に失敗しています(自動で再試行中)',
+    terrainFarGiveUp: '⚠️ 遠景データを取得できません(平坦な遠景のまま続行します)',
+    mapLoadingToast: '🗺 マップを読み込み中...',
+    cleanupDoneToast: '🧹 現在地周辺以外を整理しました(ジオメトリ {before} → {after})',
+    mapShownToast: '✨ マップを表示しました',
+    mapPartialFailToast: '⚠️ 地図取得が一部失敗しました(背景で再試行を続けます)',
+    meijiCreditBase: '明治期土地利用: 出典 <a href="https://habs.rad.naro.go.jp/" target="_blank" style="color:#cdb">農研機構農業環境研究部門</a>(迅速測図・CC BY 4.0)',
+    meijiCreditEdoNote: '<br>※江戸期の実測地図が無いため、明治期データを近似として使用しています',
+    deployInfoUnavailable: 'デプロイ日時: 取得できません(サーバ経由で開いてください)',
+    deployInfoLine: '🚀 デプロイ日時: {time}',
+    deployInfoCommitSuffix: ', コミット: {time}',
+  },
+  en: {
+    // ---- 静的UI(index.html) ----
+    addrLoading: '📍 Locating you...',
+    addrUnknown: '📍 (Unknown location)',
+    gpsLoading: '📍 Fetching coordinates...',
+    viewBtnTitle: 'Switch view (3rd person to 1st person to top-down)',
+    viewThird: '👁 3rd Person',
+    viewFirst: '👁 1st Person',
+    viewTop: '🗺 Top-down',
+    jumpBtnTitle: 'Map jump',
+    modeBtnTitle: 'Era mode',
+    modeReal: '🏙 Real',
+    modeMeiji: '🌾 Meiji',
+    modeEdo: '🏯 Edo',
+    modeMarchen: '🍭 Fairytale',
+    modeSpace: '🛸 Space',
+    perfBtnTitle: 'Settings (rendering, sea level, time of day, character, view)',
+    helpBtnTitle: 'Controls help',
+    perfSectionTitle: '⚙ Render distance & load (changing this reloads the page)',
+    perfLite: '🌱 Light',
+    perfStd: '⚖️ Standard',
+    perfHigh: '🏙 High Quality',
+    perfLiteSub: 'Light',
+    perfStdSub: 'Standard',
+    perfHighSub: 'High Quality',
+    perfDesc1: 'Light: buildings 1.4km / low load (for phones)<br>Standard: buildings 2.2km<br>High Quality: buildings 4.2km / wider prefetch (for powerful PCs, uses more memory)',
+    cleanupNowBtn: '🧹 Clean up now',
+    cleanupDesc: 'Frees up GPU meshes for roads/buildings/parks/water away from your current location (records are kept, so revisiting restores them. Press this if things get heavy after a long play session)',
+    debugTileBtn: '🩺 Tile status',
+    debugTileDesc: 'Debug: color-codes the fetch/generation status of nearby OSM tiles (gray=not fetched, red=fetching, blue=waiting for terrain, orange=generating, green=done)',
+    seaLevelLabel: '🌊 Sea level',
+    timeSectionTitle: '🕐 Time of day (manual override)',
+    timeAuto: '🕐 Auto',
+    timeMorning: '🌅 Morning',
+    timeNoon: '☀️ Noon',
+    timeEvening: '🌇 Evening',
+    timeNight: '🌙 Night',
+    timeAutoSub: 'Auto',
+    timeMorningSub: 'Morning',
+    timeNoonSub: 'Noon',
+    timeEveningSub: 'Evening',
+    timeNightSub: 'Night',
+    timeDesc: 'Fix the time to noon to check building colors (useful if buildings look purplish)',
+    charSectionTitle: '🧍 Character',
+    charBoy: '👦 Boy',
+    charGirl: '👧 Girl',
+    camDirSectionTitle: '🔄 Camera rotation direction',
+    camDirStandard: 'Standard',
+    camDirInverted: 'Inverted',
+    uiToggleTitle: 'Show/hide UI',
+    mapHintDefault: 'Tap a location to jump there',
+    mapSearchPlaceholder: 'Search by place, address, or facility name',
+    mapSearchBtnLabel: '🔎 Search',
+    geoBtnLabel: '📡 My location',
+    helpBody: 'PC: WASD to move / Shift to dash / Space to jump / drag to rotate view / C to toggle altitude hold<br>Mobile: left stick to move (tilt further to speed up) / swipe right side to rotate view / ⤴ to jump / 🔓 to toggle altitude hold',
+    closeBtn: 'Close',
+    statusInitial: '🗺 Loading Isehara map...',
+    debugLegendHtml: '🩺From left: terrain / road+rail / building<span style="background:#555555"></span>not fetched<span style="background:#3388dd"></span>waiting<span style="background:#dd3333"></span>fetching<span style="background:#ffaa22"></span>generating<span style="background:#33cc55"></span>done<span style="background:#9b3fd4"></span>gave up (unreached)',
+    altKeepTitleOff: 'Altitude hold (tap while airborne)',
+    altKeepTitleOn: 'Altitude hold on (tap to release)',
+    // ---- 動的メッセージ(part4/6/7/8.js) ----
+    mapHintJumpTo: '📍 Jumping to {name}!',
+    mapHintSearching: '🔎 Searching for "{q}"...',
+    mapHintNotFound: '⚠️ "{q}" was not found',
+    mapHintGeoUnsupported: '⚠️ This device/browser does not support location services',
+    mapHintGeoHttpsOnly: '⚠️ Location services require an HTTPS connection (will not work over LAN like http://192.168...; please try the https version, e.g. on Render)',
+    mapHintGeoFetching: '📡 Fetching your location...',
+    mapHintGeoJump: '📍 Jumping to your location!',
+    mapHintGeoFailed: '⚠️ Could not get your location ({reason})',
+    geoPermissionDenied: 'Location permission was denied',
+    gpsElevation: 'Elevation {elev}m',
+    gpsOpenGoogleMaps: 'Open in Google Maps',
+    meijiLanduseLabel: 'Meiji-era land use',
+    meijiLanduseEdoLabel: 'Meiji-era data (as an Edo-era approximation)',
+    meijiLoadingToast: 'Loading {label} data...',
+    meijiLoadedToast: '{label}: {count} points loaded',
+    terrainLoadingRegion: '🏔 Loading terrain for this area...',
+    terrainApplied: '🏔 Terrain updated',
+    terrainFarFailRetry: '⚠️ Failed to fetch distant terrain (retrying automatically)',
+    terrainFarGiveUp: '⚠️ Could not fetch distant terrain data (continuing with flat terrain)',
+    mapLoadingToast: '🗺 Loading map...',
+    cleanupDoneToast: '🧹 Cleaned up areas away from your current location (geometries {before} to {after})',
+    mapShownToast: '✨ Map displayed',
+    mapPartialFailToast: '⚠️ Some map data failed to load (retrying in the background)',
+    meijiCreditBase: 'Meiji-era land use: source <a href="https://habs.rad.naro.go.jp/" target="_blank" style="color:#cdb">NARO Institute for Agro-Environmental Sciences</a> (Rapid Survey Maps, CC BY 4.0)',
+    meijiCreditEdoNote: '<br>*No surveyed maps exist from the Edo era, so Meiji-era data is used as an approximation',
+    deployInfoUnavailable: 'Deploy time: unavailable (please open via the server)',
+    deployInfoLine: '🚀 Deploy time: {time}',
+    deployInfoCommitSuffix: ', commit: {time}',
+  },
+};
+let currentLang = 'ja';
+try { currentLang = localStorage.getItem('iseharaLang') || 'ja'; } catch (e) {}
+function t(key, vars) {
+  let s = (I18N[currentLang] && I18N[currentLang][key]) || I18N.ja[key] || key;
+  if (vars) for (const k in vars) s = s.split('{' + k + '}').join(vars[k]);
+  return s;
+}
+function setLang(lang) {
+  currentLang = lang;
+  try { localStorage.setItem('iseharaLang', lang); } catch (e) {}
+  applyI18n();
+}
+// data-i18n系属性を持つ全要素へ現在言語のテキストを反映し、続けて他part.jsが持つ
+// 「現在の状態(視点モード・描写プリセット・視点回転向き・高度キープ等)依存で
+// 中身が変わる動的ラベル」の再描画関数も呼ぶ(state依存のためdata-i18n属性の
+// 一括置換だけではカバーできない)。該当スクリプトが未読み込みでも安全なようtypeof確認する。
+function applyI18n() {
+  document.documentElement.lang = currentLang;
+  document.querySelectorAll('[data-i18n]').forEach(el => { el.textContent = t(el.getAttribute('data-i18n')); });
+  document.querySelectorAll('[data-i18n-title]').forEach(el => { el.title = t(el.getAttribute('data-i18n-title')); });
+  document.querySelectorAll('[data-i18n-placeholder]').forEach(el => { el.placeholder = t(el.getAttribute('data-i18n-placeholder')); });
+  document.querySelectorAll('[data-i18n-html]').forEach(el => { el.innerHTML = t(el.getAttribute('data-i18n-html')); });
+  if (typeof refreshModeLabel === 'function') refreshModeLabel();
+  if (typeof refreshViewLabel === 'function') refreshViewLabel();
+  if (typeof refreshPerfLabel === 'function') refreshPerfLabel();
+  if (typeof updateCamDirBtn === 'function') updateCamDirBtn();
+  if (typeof updateAltKeepBtn === 'function') updateAltKeepBtn();
+  if (typeof updateLangButtons === 'function') updateLangButtons();
+  if (typeof refreshMeijiCredit === 'function') refreshMeijiCredit();
+  if (typeof refreshDeployInfo === 'function') refreshDeployInfo();
+}
+
 // Prevent default touch scroll everywhere
 document.documentElement.style.touchAction = 'none';
 document.body.style.touchAction = 'none';
@@ -11,26 +231,34 @@ document.body.style.touchAction = 'none';
 // ======= 表示モード =======
 // 地形・道路・当たり判定・ゲームロジックは全モード共通。見た目(マテリアル/ジオメトリ/環境色)のみ差し替える。
 // 切替は localStorage に保存してリロード=ワールド全体をそのモードで再生成(最も安全な「チャンク再構築」)。
+// 【2026-07-22】labelを「絵文字1個+i18nキー」に分解(UI言語切替対応)。
+// 絵文字部分は言語に関わらず固定、テキスト部分だけt()で切り替える。
 const VISUAL_MODES = [
-  { id: 'real',    label: '🏙 現実' },
-  { id: 'meiji',   label: '🌾 明治' },
-  { id: 'edo',     label: '🏯 江戸' },
-  { id: 'marchen', label: '🍭 メルヘン' },
-  { id: 'space',   label: '🛸 宇宙' },
+  { id: 'real',    icon: '🏙', key: 'modeReal' },
+  { id: 'meiji',   icon: '🌾', key: 'modeMeiji' },
+  { id: 'edo',     icon: '🏯', key: 'modeEdo' },
+  { id: 'marchen', icon: '🍭', key: 'modeMarchen' },
+  { id: 'space',   icon: '🛸', key: 'modeSpace' },
 ];
 let MODE = 'real';
 try {
   const m = localStorage.getItem('iseharaVisualMode');
   if (VISUAL_MODES.some(v => v.id === m)) MODE = m;
 } catch (e) {}
+// 現在のMODEに応じたモードボタンのアイコン・ラベルを再描画する(言語切替時にも
+// applyI18n()から呼ばれる。「今まさに画面に表示されている」状態依存ラベルのため)。
+function refreshModeLabel() {
+  const idx = VISUAL_MODES.findIndex(v => v.id === MODE);
+  const icoEl = document.getElementById('modeIco'), subEl = document.getElementById('modeSub');
+  if (icoEl) icoEl.textContent = VISUAL_MODES[idx].icon;
+  if (subEl) subEl.textContent = t(VISUAL_MODES[idx].key);
+}
 (function initModeBtn() {
   const btn = document.getElementById('modeBtn');
-  const idx = VISUAL_MODES.findIndex(v => v.id === MODE);
-  const [icoText, ...labelParts] = VISUAL_MODES[idx].label.split(' ');
-  document.getElementById('modeIco').textContent = icoText;
-  document.getElementById('modeSub').textContent = labelParts.join(' ');
+  refreshModeLabel();
   btn.addEventListener('click', () => {
-    const next = VISUAL_MODES[(idx + 1) % VISUAL_MODES.length].id;
+    const curIdx = VISUAL_MODES.findIndex(v => v.id === MODE);
+    const next = VISUAL_MODES[(curIdx + 1) % VISUAL_MODES.length].id;
     try {
       localStorage.setItem('iseharaVisualMode', next);
       // 現在位置と向きを保存 → リロード後の loadOSM がここから再開する(スポーンに戻さない)
@@ -85,13 +313,16 @@ const IS_MEIJI = MODE === 'meiji';
 // 江戸: 当時の実測地図データが無いため、明治期(迅速測図)土地利用データを近似として流用する。
 // (現代のOSM建物をそのまま使うと、明治より江戸の方が高層建築だらけになってしまうため)
 const USES_MEIJI_LANDUSE = IS_MEIJI || MODE === 'edo';
-// 明治期土地利用データの出典表記(CC BY 4.0 の帰属表示。江戸モードでも同データを使うため表示する)
-if (USES_MEIJI_LANDUSE) {
+// 明治期土地利用データの出典表記(CC BY 4.0 の帰属表示。江戸モードでも同データを使うため表示する)。
+// 言語切替中も「今まさに画面に表示されている」文言のため、関数化してapplyI18n()からも呼べるようにする。
+function refreshMeijiCredit() {
+  if (!USES_MEIJI_LANDUSE) return;
   const cr = document.getElementById('credit');
+  if (!cr) return;
   cr.style.display = 'block';
-  cr.innerHTML = '明治期土地利用: 出典 <a href="https://habs.rad.naro.go.jp/" target="_blank" style="color:#cdb">農研機構農業環境研究部門</a>(迅速測図・CC BY 4.0)'
-    + (MODE === 'edo' ? '<br>※江戸期の実測地図が無いため、明治期データを近似として使用しています' : '');
+  cr.innerHTML = t('meijiCreditBase') + (MODE === 'edo' ? t('meijiCreditEdoNote') : '');
 }
+refreshMeijiCredit();
 
 // ======= SCENE SETUP =======
 const canvas = document.getElementById('canvas');

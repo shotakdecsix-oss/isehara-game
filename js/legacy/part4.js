@@ -551,15 +551,15 @@ async function loadMeijiMesh(lat, lon) {
 
 async function loadMeijiLanduse() {
   // 江戸: 当時の実測地図が無いため、明治期(迅速測図)データを地形の近似として流用する
-  const label = MODE === 'edo' ? '明治期データを江戸期の近似として' : '明治期土地利用';
-  showToast(`🌾 ${label}データ取得中...`, { sticky: true });
+  const label = MODE === 'edo' ? t('meijiLanduseEdoLabel') : t('meijiLanduseLabel');
+  showToast(`🌾 ${t('meijiLoadingToast', { label })}`, { sticky: true });
   const jobs = [];
   for (const lat of [OSM_BOUNDS.minLat, OSM_BOUNDS.maxLat])
     for (const lon of [OSM_BOUNDS.minLon, OSM_BOUNDS.maxLon])
       jobs.push(loadMeijiMesh(lat, lon));
   await Promise.all(jobs);
   meijiReady = true;
-  showToast(`🌾 ${label} ${meijiCells.size} 地点読込`);
+  showToast(`🌾 ${t('meijiLoadedToast', { label, count: meijiCells.size })}`);
 }
 
 // 【2026-07-17】thinPts/stitchRings(+_llEq)はjs/lib/pure.jsへ移動(CODE_REVIEW_20260717 P13-1)。
