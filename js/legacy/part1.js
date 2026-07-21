@@ -849,7 +849,7 @@ function unloadFarBuildings(force) {
     // 再接近時に復元できるよう、軽量な記述だけdormantBuildingsへ(すでに
     // BUILDING_UNLOAD_DIST > BUILDING_GEN_DIST の外なので、そのままpendingBuildingsへ
     // 戻すと次のフレームで即dormantへ送り返されるだけの無駄が発生する)。
-    dormantBuildings.push({ x: rec.x, z: rec.z, w: rec.w, d: rec.d, h: rec.h, style: rec.style, real: rec.real, rot: rec.rot });
+    dormantAdd({ x: rec.x, z: rec.z, w: rec.w, d: rec.d, h: rec.h, style: rec.style, real: rec.real, rot: rec.rot });
   }
   removeBuildingsByIds(removeIds);
 }
@@ -867,43 +867,62 @@ let _dormantCheckFrame = 0;
 function reactivateNearbyDormantBuildings() {
   _dormantCheckFrame++;
   if (_dormantCheckFrame % 90 !== 0) return;
-  if (dormantBuildings.length === 0) return;
+  if (dormantCount === 0) return;
   // 総数上限(PERF.bMax)到達中は復帰させない(復帰→上限で即dormant戻しの空回り防止)
   if (buildingRecords.length >= PERF.bMax) return;
   const px = player.position.x, pz = player.position.z;
-  // 【2026-07-21・Fable5診断】上限付近(unloadFarBuildings側の_nearCap判定と同じ閾値)では、
-  // evictionが直近で実際に適用した保持距離(_lastRealKeepDist、修正6のヒストグラム縮小後の
-  // 値)の80%までしか復帰させない。同じ90フレーム周期でevict/reviveを別々に判定しているため、
-  // 両者が同じ境界(例: 生成距離ぎりぎり)を使うと、境界付近の建物が解放→復帰→解放…を
-  // 往復するチャーン(クラッシュ調査で問題になったのと同種の無駄なgeometry再生成)を
-  // 起こしうる。マージンを設けて緩衝帯を作る。上限に余裕がある通常時は従来通り生成距離まで。
+  // 【2026-07-21・Fable5診断(v2)】密集地(東京駅等)では既知の実建物数がbMaxを大きく
+  // 超えるため、records(=buildingRecords.length)がbMax付近(80%超)に恒常的に張り付き
+  // 続けるのが構造的な必然であり、「過渡的な回復中」と「定常的な高止まり」を閾値で
+  // 区別しようとした前回の設計(80%未満=無制限、80%以上=200件固定)は、密集地では
+  // 実質「常に200件/サイクル(≈133件/秒)」に固定されているのと同じになってしまい、
+  // dormant数万件規模の復帰が追いつかず新たなボトルネックになった(実機ログで確認: 特定
+  // タイルのbuildPendingが10秒以上一切減らないまま固定)。閾値によるレジーム切り替え自体を
+  // やめ、「修正6のヒストグラム縮小(85%まで空ける)と対になる、今空いている容量ぶんだけ」
+  // を予算にする。空きが無ければ0、大きく空いていれば(上限復帰直後等)それに応じて多く
+  // 復帰できる、雪崩スパイクは構造的に起きない(空き以上には入れられないため)。
+  // 実際のメッシュ生成コストは下流(exploreOnUpdateの_buildFrameDeadline=8ms)が
+  // 別途守っているので、ここでの上限緩和が直接フレーム落ちにつながることはない。
+  const REVIVE_BUDGET = Math.max(0, Math.min(600, Math.floor(PERF.bMax * 0.95 - buildingRecords.length)));
+  if (REVIVE_BUDGET === 0) return;
+  // ヒステリシスマージン(evict境界とのチャタリング防止)は維持。
   const _nearCapNow = buildingRecords.length >= PERF.bMax * 0.95;
   const _realRevLim = _nearCapNow ? Math.min(BUILDING_GEN_DIST_REAL, _lastRealKeepDist * 0.8) : BUILDING_GEN_DIST_REAL;
   const d2Real = _realRevLim * _realRevLim;
   const d2Proc = BUILDING_GEN_DIST_PROC * BUILDING_GEN_DIST_PROC;
-  // 【2026-07-21・Fable5診断→実機で過剰スロットル判明】上限到達状態が解けた直後、生成距離内の
-  // dormantが密集地では数万件規模になりうるため、1パスで全件pendingBuildingsへ流し込む
-  // スパイクを避ける上限を設けたい、というのが元々の狙い。ところが最初の実装は上限から
-  // 遠い(余裕がある)通常時にも一律200件/サイクルに絞ってしまい、dormantが多く溜まっている
-  // 状況(実機ログ: records 7150/12000で余裕があるのにdormant 74219)で復帰そのものが
-  // ボトルネックになり、建物生成が大幅に遅延する退行を引き起こした(実機報告で発覚)。
-  // 「スパイクを抑えたいのは上限付近だけ」という本来の狙いに合わせ、上限にまだ余裕がある
-  // 間(80%未満)は従来通り無制限に復帰させ、80%以上(上限到達・その直後の回復途中)だけ
-  // 200件/サイクルに絞る。
-  const _recoveringNearCap = buildingRecords.length >= PERF.bMax * 0.8;
-  const REVIVE_BUDGET = _recoveringNearCap ? 200 : Infinity;
+  // 【2026-07-21・Fable5診断(v2)】以前は配列の末尾(=直近dormant入りした建物)から走査
+  // していたため、古くから待っている近傍建物に予算が永遠に回らない「LIFO飢餓」を
+  // 起こしていた(レートを上げても解決しない選択の問題、と指摘された)。プレイヤーに
+  // 近いセル(DORMANT_CELL=200m四方、part8.js)から外側へ順に走査し、常に「近い建物が
+  // 最優先で復帰する」ことを保証する。
+  const maxD = Math.sqrt(Math.max(d2Real, d2Proc));
+  const maxR = Math.max(0, Math.ceil(maxD / DORMANT_CELL)) + 1;
+  const pgx = Math.floor(px / DORMANT_CELL), pgz = Math.floor(pz / DORMANT_CELL);
   let revived = 0;
-  for (let i = dormantBuildings.length - 1; i >= 0 && revived < REVIVE_BUDGET; i--) {
-    const b = dormantBuildings[i];
-    const dx = b.x - px, dz = b.z - pz;
-    let dd = dx * dx + dz * dz;
-    // 【2026-07-21・Fable5診断】unloadFarBuildingsの高層優遇(÷1.6、距離の2乗なので÷2.56)と
-    // 評価基準を揃える。揃っていないと高層建物だけevict/revive境界がずれてチャーンしうる。
-    if (b.real && b.h > 40) dd /= 2.56;
-    if (dd <= (b.real ? d2Real : d2Proc)) {
-      dormantBuildings.splice(i, 1);
-      pendingBuildings.push(b);
-      revived++;
+  for (let r = 0; r <= maxR && revived < REVIVE_BUDGET; r++) {
+    for (let gx = pgx - r; gx <= pgx + r && revived < REVIVE_BUDGET; gx++) {
+      for (let gz = pgz - r; gz <= pgz + r; gz++) {
+        if (Math.max(Math.abs(gx - pgx), Math.abs(gz - pgz)) !== r) continue; // このリング(距離r)の外周セルだけ
+        const arr = dormantGrid.get(gx + ',' + gz);
+        if (!arr || arr.length === 0) continue;
+        for (let i = arr.length - 1; i >= 0 && revived < REVIVE_BUDGET; i--) {
+          const b = arr[i];
+          const dx = b.x - px, dz = b.z - pz;
+          let dd = dx * dx + dz * dz;
+          // 【2026-07-21・Fable5診断】unloadFarBuildingsの高層優遇(÷1.6、距離の2乗なので
+          // ÷2.56)と評価基準を揃える。揃っていないと高層建物だけevict/revive境界がずれて
+          // チャーンしうる。
+          if (b.real && b.h > 40) dd /= 2.56;
+          if (dd <= (b.real ? d2Real : d2Proc)) {
+            const last = arr.length - 1; // セル内はswap-remove(順序不要なのでO(1))
+            arr[i] = arr[last]; arr.pop();
+            dormantCount--;
+            pendingBuildings.push(b);
+            revived++;
+          }
+        }
+        if (arr.length === 0) dormantGrid.delete(gx + ',' + gz);
+      }
     }
   }
 }

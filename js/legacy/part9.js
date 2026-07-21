@@ -166,7 +166,7 @@ function updateDebugTileOverlay(force) {
   const bump = (map, k) => map.set(k, (map.get(k) || 0) + 1);
   const pendingByTile = new Map(), dormantByTile = new Map(), doneByTile = new Map();
   for (let i = pendingBuildingIdx; i < pendingBuildings.length; i++) bump(pendingByTile, tileKeyOf(pendingBuildings[i].x, pendingBuildings[i].z));
-  for (const b of dormantBuildings) bump(dormantByTile, tileKeyOf(b.x, b.z));
+  for (const arr of dormantGrid.values()) for (const b of arr) bump(dormantByTile, tileKeyOf(b.x, b.z));
   for (const rec of buildingRecords) bump(doneByTile, tileKeyOf(rec.x, rec.z));
   // 【2026-07-19】roadReadyTiles は「道路データを受信・登録済み」なだけで、実際の3Dメッシュ化
   // (processRoadMeshQueue、フレーム分割)はまだこれからのことがある。特にタイル到着直後は
@@ -235,7 +235,11 @@ function updateDebugTileOverlay(force) {
     group.roadMesh.material.color.setHex(roadColor);
     group.buildMesh.material.color.setHex(buildColor);
     group.visible = true;
-    logRows.push({ tile: key, status, road: roadReady, roadMeshPending, terrain: terrainReady, buildDone: done, buildPending: pending, fails: osmTileFailCount.get(key) || 0 });
+    // 【2026-07-21・Fable5診断(d)】以前はpending(処理待ちキュー)とdormant(復帰待ちで
+    // 眠っている分)を合算した1つの数字だけを表示しており、「今すぐ生成されそうな数」と
+    // 「復帰待ちでまだ順番も回ってきていない数」の区別がつかず、密集地で「詰まっている」と
+    // 誤読しやすかった(実態は復帰レート律速で正常な高止まり)。分けて出す。
+    logRows.push({ tile: key, status, road: roadReady, roadMeshPending, terrain: terrainReady, buildDone: done, buildQueued: pendingByTile.get(key) || 0, buildDormant: dormantByTile.get(key) || 0, fails: osmTileFailCount.get(key) || 0 });
   }
   // 範囲外に出た平面は隠すだけ(破棄しない。再度範囲に入ったらそのまま使い回す)
   for (const [key, mesh] of debugTilePlanes) if (!seen.has(key)) mesh.visible = false;
@@ -247,7 +251,7 @@ function updateDebugTileOverlay(force) {
     console.log('[fetch] active', osmTileActiveCount, 'queue', osmTileQueue.length,
       'cooldown(ms)', Math.max(0, osmGlobalCooldownUntil - Date.now()),
       'streak', _osm429Streak, 'records', buildingRecords.length, '/', PERF.bMax,
-      'dormant', dormantBuildings.length);
+      'dormant', dormantCount);
     // 【2026-07-21・ユーザー要望】データ取得(上の[fetch]行)とは別に、取得後の生成処理側の
     // スループットを見る計器。budget/roadGate/rushは直近フレームのスナップショット、
     // gen/requeue/dormantはこの~2秒間の累計。requeueが支配的ならチャンク地形/周辺タイル
@@ -543,7 +547,7 @@ function animate() {
     if (b.real) {
       const bdx = b.x - player.position.x, bdz = b.z - player.position.z;
       if (bdx * bdx + bdz * bdz > BUILDING_GEN_DIST_REAL * BUILDING_GEN_DIST_REAL) {
-        dormantBuildings.push(b);
+        dormantAdd(b);
         _bgDormant++;
         continue;
       }
@@ -551,7 +555,7 @@ function animate() {
       // 数万棟に達しGPUメモリが際限なく積み上がる(浮上クラッシュの真因)。上限到達分は
       // dormantへ退避し、移動でunloadFarBuildingsが枠を空けたら近い順に復帰する。
       if (buildingRecords.length >= PERF.bMax) {
-        dormantBuildings.push(b);
+        dormantAdd(b);
         _bgDormant++;
         continue;
       }

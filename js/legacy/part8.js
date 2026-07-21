@@ -99,7 +99,21 @@ let pendingBuildingIdx = 0;
 // 戻す。pendingBuildingsに残したまま距離判定だけ毎フレーム繰り返すと、遠方の建物が
 // 溜まるほど「足踏みして即キュー末尾へ戻す」だけの空回りが増えてしまうため、
 // 生成ループの外(低頻度スキャン)に分離する。
-const dormantBuildings = [];
+// 【2026-07-21・Fable5診断(v2)】以前は単純な配列で、reactivateNearbyDormantBuildingsが
+// 末尾(=直近dormant入りした建物)から走査していたため、古くから待っている近傍の建物に
+// 予算が永遠に回らない「LIFO飢餓」を起こしていた(密集地で特定タイルのbuildPendingが
+// 何十秒経っても数字ごと不変のまま固まる不具合の直接原因)。プレイヤーに近いセルから
+// 優先的に復帰させられるよう、200m四方の空間グリッドで管理する。
+const DORMANT_CELL = 200;
+const dormantGrid = new Map(); // "gx,gz" -> 建物記述子の配列
+let dormantCount = 0; // dormantGrid内の総数(逐次カウンタ。ログ表示・空判定用)
+function dormantAdd(b) {
+  const key = Math.floor(b.x / DORMANT_CELL) + ',' + Math.floor(b.z / DORMANT_CELL);
+  let arr = dormantGrid.get(key);
+  if (!arr) { arr = []; dormantGrid.set(key, arr); }
+  arr.push(b);
+  dormantCount++;
+}
 
 // 駅ランドマーク。以前は初期ロード(loadOSM)時にしか処理しておらず、タイル取得側の
 // クエリにも駅ノードが含まれていなかったため、初期範囲の外にある駅(愛甲石田以外)が
