@@ -900,7 +900,17 @@ function addFireTower(x, z) {
 }
 
 // Build a terrain-following road ribbon as a single BufferGeometry mesh
-function makeRoadGeo(x1, z1, x2, z2, width, yOffset) {
+// 【2026-07-21・橋対応】bridgeInfoが渡された場合({ax,az,bx,bz,fracA,fracB} = 橋全体の
+// 入口・出口の座標と、このセグメントが橋全体の中で占める道なり距離の割合。part8.js参照)、
+// 地形サンプリング(getGroundY)を区間の中間点では一切使わず、橋の入口・出口2点だけの
+// 地形高さを毎回(再構築のたびに)取り直し、その間をfracA〜fracBで線形補間する。
+// 入口・出口の地形高さは通常の道路と全く同じgetGroundYで求めるため、橋の手前・先の
+// 道路(=同じ入口・出口ノードで終わる区間)の高さと必ず一致し、継ぎ目が生じない。
+// 座標(絶対高さではない)を保持して毎回再サンプリングするのは、NEAR高解像度地形が
+// 後から届いた際に通常の道路と同じタイミングで橋の高さも追従して精度が上がるようにするため
+// (高さを一度きり確定させて焼き込むと、地形がまだ粗い段階の値のまま固定されてしまう)。
+// 横断方向(cols)も全列で同じ高さにする(橋の路面は地形に倣わずフラットな板であるべきため)。
+function makeRoadGeo(x1, z1, x2, z2, width, yOffset, bridgeInfo) {
   const dx = x2-x1, dz = z2-z1;
   const len = Math.sqrt(dx*dx+dz*dz);
   if (len < 0.1) return null;
@@ -912,11 +922,20 @@ function makeRoadGeo(x1, z1, x2, z2, width, yOffset) {
   // (峠道など)では中央が地形(バイリニア面)より低くなり、地形に埋まって見えることがあった。
   // 幅3mあたり1列を目安に中間点もサンプリングし、道の途中で地形に飲み込まれないようにする。
   const cols = Math.max(2, Math.min(5, Math.ceil(width / 3) + 1));
+  // 橋区間: 入口・出口の地形高さをこの構築タイミングで取り直し、区間の両端の高さを確定する
+  let bridgeYA = null, bridgeYB = null;
+  if (bridgeInfo) {
+    const yA0 = getGroundY(bridgeInfo.ax, bridgeInfo.az), yB0 = getGroundY(bridgeInfo.bx, bridgeInfo.bz);
+    bridgeYA = yA0 + (yB0 - yA0) * bridgeInfo.fracA;
+    bridgeYB = yA0 + (yB0 - yA0) * bridgeInfo.fracB;
+  }
 
   const verts = [], idxs = [], uvs = [];
   for (let i = 0; i <= segs; i++) {
     const t = i / segs;
     const cx = x1 + dx*t, cz = z1 + dz*t;
+    // 橋区間: 地形を無視し、区間の両端(bridgeYA/bridgeYB)を単純に線形補間する
+    const bridgeVy = bridgeInfo ? (bridgeYA + (bridgeYB - bridgeYA) * t) : null;
     // 各横断位置ごとに個別に地形高さをサンプリング。
     // (以前は中心線の高さを両端に使っていたため、道路を横切る斜面では
     //  山側の端が地形に埋まって途切れて見えた)
@@ -924,7 +943,8 @@ function makeRoadGeo(x1, z1, x2, z2, width, yOffset) {
       const u = c / (cols - 1); // 0=left .. 1=right
       const off = hw - u * width;
       const vx = cx + px*off, vz = cz + pz*off;
-      verts.push(vx, getGroundY(vx, vz) + yOffset, vz);
+      const vy = bridgeVy != null ? bridgeVy + yOffset : getGroundY(vx, vz) + yOffset;
+      verts.push(vx, vy, vz);
       // u=横断方向0..1 / v=道なり距離[m](テクスチャ側のrepeatで車線・枕木の周期に変換)
       uvs.push(u, t * len);
     }
@@ -943,7 +963,12 @@ function makeRoadGeo(x1, z1, x2, z2, width, yOffset) {
   return geo;
 }
 
-function addRoad(x1, z1, x2, z2, width, type='road') {
+// 【2026-07-21・橋対応】bridgeY: {ax,az,bx,bz,fracA,fracB}(part8.jsが算出。ax/az/bx/bzは
+// 橋全体の入口・出口の座標、fracA/fracBはこのセグメントが橋全体の中で占める道なり距離の
+// 割合)。実際の高さはmakeRoadGeoが構築のたびにgetGroundYで取り直して線形補間する
+// (座標だけ保持し、高さを一度きり焼き込まないことで地形精度の向上に追従できるようにする)。
+// 橋区間でなければnull。
+function addRoad(x1, z1, x2, z2, width, type='road', bridgeY=null) {
   const dx = x2-x1, dz = z2-z1;
   const totalLen = Math.sqrt(dx*dx+dz*dz);
   if (totalLen < 0.5) return;
@@ -1009,7 +1034,7 @@ function addRoad(x1, z1, x2, z2, width, type='road') {
   // railWhiteは距離アンロード(unloadFarRoads)/復元(rebuildRoadMesh)で本体と一緒に扱う。
   // 【重要】重いメッシュ生成はここでは行わず、レコード登録+フレーム分割キュー投入だけにする
   // (密集タイル到着時の数十秒フリーズ対策。isOnRoad・ミニマップはレコードだけで正しく動く)。
-  const rec = {x1, z1, x2, z2, type, rw: w, mesh: null, mat, yOff, railWhite: null};
+  const rec = {x1, z1, x2, z2, type, rw: w, mesh: null, mat, yOff, railWhite: null, bridgeY};
   addRoadRecord(rec);
   queueRoadMesh(rec);
 

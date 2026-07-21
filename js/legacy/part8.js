@@ -181,10 +181,39 @@ function processTileData(data, tileCount) {
         const unpaved = sf ? UNPAVED_SURFACES.has(sf) : (hw === 'track' || hw === 'path');
         if (unpaved) type = 'unpaved';
       }
+      // 【2026-07-21・橋対応】OSMのbridge=yes(等)が付いたウェイは、地形(実標高)を
+      // そのままサンプリングすると川底/谷底の低い値を拾って沈んで見える(motorwayは
+      // 元々addMotorwayで常時高架化されるため対象外)。ウェイ全体の入口・出口2点の座標
+      // だけを覚えておき(高さそのものはmakeRoadGeoが構築のたびに取り直す。part3.js参照)、
+      // その間を道なり距離の割合で線形補間した高さを使うことで、地形の細かい起伏サンプリング
+      // を完全に避けつつ、橋の前後の道路(=入口・出口そのものの地形高さ)とは値が一致する
+      // ため継ぎ目なく繋がる。水域に限らず(谷・線路またぎ等)全ての橋に同じロジックを
+      // 適用する。OSMには橋の絶対高さ(標高)を示すタグが実質存在しないため、既定はこの
+      // 補間に任せる。
+      const isBridge = type !== 'motorway' && tags.bridge && tags.bridge !== 'no';
+      let bridgeAx = 0, bridgeAz = 0, bridgeBx = 0, bridgeBz = 0, bridgeCum = null, bridgeTotalLen = 0;
+      if (isBridge) {
+        const pts = el.geometry.map(g => latLonToXZ(g.lat, g.lon));
+        bridgeCum = [0];
+        for (let i = 1; i < pts.length; i++) {
+          const ddx = pts[i].x - pts[i-1].x, ddz = pts[i].z - pts[i-1].z;
+          bridgeCum.push(bridgeCum[i-1] + Math.sqrt(ddx*ddx + ddz*ddz));
+        }
+        bridgeTotalLen = bridgeCum[bridgeCum.length - 1];
+        bridgeAx = pts[0].x; bridgeAz = pts[0].z;
+        bridgeBx = pts[pts.length - 1].x; bridgeBz = pts[pts.length - 1].z;
+      }
       for (let i = 0; i < el.geometry.length-1; i++) {
         const a = latLonToXZ(el.geometry[i].lat, el.geometry[i].lon);
         const b = latLonToXZ(el.geometry[i+1].lat, el.geometry[i+1].lon);
-        addRoad(a.x, a.z, b.x, b.z, width, type);
+        let bridgeY = null;
+        if (isBridge && bridgeTotalLen > 0.01) {
+          bridgeY = {
+            ax: bridgeAx, az: bridgeAz, bx: bridgeBx, bz: bridgeBz,
+            fracA: bridgeCum[i] / bridgeTotalLen, fracB: bridgeCum[i+1] / bridgeTotalLen
+          };
+        }
+        addRoad(a.x, a.z, b.x, b.z, width, type, bridgeY);
       }
     }
     if (!USES_MEIJI_LANDUSE && tags.railway === 'rail') {

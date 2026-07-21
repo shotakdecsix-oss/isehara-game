@@ -444,7 +444,7 @@ function landuseTypeAt(x, z) {
 // (=プレイヤー付近のチャンクが生成された=近くまで戻ってきた)でメッシュを作り直して復元する。
 function rebuildRoadMesh(r) {
   if (r.type === 'motorway') { if (r.mesh) rebuildMotorwayMesh(r); return; } // 高架はアンロード対象外(常にmesh有り)
-  const geo = makeRoadGeo(r.x1, r.z1, r.x2, r.z2, r.rw, r.yOff);
+  const geo = makeRoadGeo(r.x1, r.z1, r.x2, r.z2, r.rw, r.yOff, r.bridgeY);
   if (!geo) return;
   if (r.mesh) {
     r.mesh.geometry.dispose();

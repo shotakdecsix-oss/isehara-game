@@ -41,7 +41,19 @@ const NEAR_W = 2 * NEAR_HALF_LON * SCALE * COS_LAT;
 const NEAR_D = 2 * NEAR_HALF_LAT * SCALE;
 let nearElev = null, nearCX = 0, nearCZ = 0, nearLoading = false;
 
-let seaLevelM = 5;            // 海面の実標高(m)。スライダーで変更可(elevBase確定時に初期値を上書き)
+// 【2026-07-21修正】以前はここが暫定値5(後でinitDistantSeaが3で上書き)で、しかも
+// 「地域の最低標高より少し下」に自動追従させる案もあったが、それだと地点を移動する
+// たびに海面の実標高上の意味が地域ごとにズレてしまい不自然(ユーザー指摘)。
+// 海面は常に実標高0m(現実の海抜0m)固定とし、地域を移動しても変わらない。
+// 江東区等の0m地帯が沈んで見える問題は、海面側ではなく陸地側の底上げ(下のLAND_FLOOR_MARGIN_M
+// 参照)で解消する。
+let seaLevelM = 0;             // 海面の実標高(m)。常に0固定(スライダーでの手動調整のみ可)
+// 陸地(標高データが実際に存在する地点)は、海面(0m)からこの高さぶんは必ず上に来るよう
+// 底上げする。実際の海(標高データ無し=oceanFloor扱い)には適用しないため、海岸線は
+// これまで通り0m地点に出る。江東区のような実標高0m前後(あるいは測量上わずかにマイナス)の
+// 低地は、堤防で守られた陸地であって海に沈んでいるわけではないため、海面プレーンに
+// 突き抜かれないようこの下駄を履かせる。
+const LAND_FLOOR_MARGIN_M = 0.5;
 // wideElev は上方(遠景地形メッシュ定義の前)で宣言済み。flat [iz*WIDE_SEGS1+ix] = ゲーム高さ(実標高で固定)
 let SEA_Y = 0;                // 海面(seaLevelM)のゲーム高さ。SEA_Y = (seaLevelM - elevBase) * ELEV_SCALE
 
@@ -123,9 +135,14 @@ async function loadWideTerrain(centerX = 0, centerZ = 0) {
   } catch (e) { wideLoading = false; onWideTerrainFail(); return; }
   const arr = new Float32Array(pts.length);
   const oceanFloor = (0 - elevBase) * ELEV_SCALE - 10; // データ無しノードは海底(海面より十分下)扱い
+  // 【2026-07-21】データが実在する陸地点(海上=null以外)は、海面(seaLevelM=実標高0m固定)より
+  // LAND_FLOOR_MARGIN_M以上は必ず上に来るよう底上げする。堤防で守られた0m地帯(江東区等)や
+  // 河川沿いの低地が、測量上0m前後・時にわずかにマイナスであるせいで海面プレーンに
+  // 沈んで見える不具合の対策(海そのもの=nullのoceanFloor扱いには影響しない)。
+  const landFloorM = seaLevelM + LAND_FLOOR_MARGIN_M;
   for (let i = 0; i < raw.length; i++) {
     const m = raw[i];
-    arr[i] = (m == null) ? oceanFloor : (m - elevBase) * ELEV_SCALE; // 実標高で固定(海面とは無関係)
+    arr[i] = (m == null) ? oceanFloor : (Math.max(m, landFloorM) - elevBase) * ELEV_SCALE;
   }
   wideElev = arr; wideCX = centerX; wideCZ = centerZ; // データと中心を同時に更新
   wideLoading = false;
@@ -253,9 +270,11 @@ async function loadNearTerrain(centerX = 0, centerZ = 0) {
   if (isNewRegion) establishRegionBase(raw);
   const arr = new Float32Array(pts.length);
   const oceanFloor = (0 - elevBase) * ELEV_SCALE - 10;
+  // loadWideTerrain側と同じ理由・同じ式で陸地の底上げを適用する(LAND_FLOOR_MARGIN_M参照)
+  const landFloorM = seaLevelM + LAND_FLOOR_MARGIN_M;
   for (let i = 0; i < raw.length; i++) {
     const m = raw[i];
-    arr[i] = (m == null) ? oceanFloor : (m - elevBase) * ELEV_SCALE;
+    arr[i] = (m == null) ? oceanFloor : (Math.max(m, landFloorM) - elevBase) * ELEV_SCALE;
   }
   nearElev = arr; nearCX = centerX; nearCZ = centerZ;
   nearLoading = false;
@@ -319,11 +338,15 @@ const waterOverlay = document.getElementById('waterOverlay');
 let _wasSubmerged = false;
 function initDistantSea() {
   if (seaMesh) return;
-  // 海面標高の初期値: 保存値があれば優先。無ければ「詳細エリアの最低標高より少し下」に置く
-  // (= 海岸が街の近くまで来て、かつ街は水没しない安全な既定値)
+  // 海面標高の初期値: 保存値(ユーザーがスライダーで手動調整した値)があれば優先。
+  // 無ければ常に実標高0m(現実の海抜0m)固定。以前は地域ごとに「詳細エリアの最低標高より
+  // 少し下」に置く想定だった(未実装のまま3固定だった)が、地点移動のたびに海面の
+  // 実質的な意味がズレるのは不自然なのでやめ、常に絶対値0mで統一する
+  // ([[project_isehara_game_distance_perf_tuning]]の「road-submersion」課題とは別件。
+  // 陸地側の底上げはLAND_FLOOR_MARGIN_M、橋はpart8.js/part3.js参照)。
   let saved = NaN;
   try { saved = parseFloat(localStorage.getItem('iseharaSeaLevel')); } catch (e) {}
-  seaLevelM = Number.isFinite(saved) ? saved : 3;
+  seaLevelM = Number.isFinite(saved) ? saved : 0;
   seaLevelM = Math.max(-10, Math.min(10, seaLevelM)); // -10〜10m
   SEA_Y = (seaLevelM - elevBase) * ELEV_SCALE;
   const c = document.createElement('canvas'); c.width = 128; c.height = 128;
