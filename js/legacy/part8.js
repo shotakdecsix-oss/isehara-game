@@ -51,6 +51,10 @@ const OSM_TILE_CONCURRENCY = 3;
 let osmTileActiveCount = 0;
 let _osmMoveUx = 0, _osmMoveUz = 0; // プレイヤーの進行方向(単位ベクトル)。取得順の前方優先に使う
 const osmTileFailCount = new Map(); // タイルごとの失敗回数(3回まで再試行)
+// 【2026-07-21・ユーザー要望】道路生成の遅延診断用: タイルが新規キュー投入された時刻。
+// fetching状態が何ms続いているか(キュー優先順位の問題か、取得自体に時間がかかっているだけか)
+// をデバッグオーバーレイで見えるようにする。
+const osmTileQueuedAt = new Map();
 // 【2026-07-21・gaveUp判定の再設計(修正5)】以前はosmTileFailCountが4に達すると理由を問わず
 // 「このタイルは諦めて建物生成をブロックしない」扱いにしていたが、429/502/504のような
 // インフラ側の一時障害まで同じカウンタに算入されてしまい、429ストーム中は移動中の足元タイルが
@@ -765,6 +769,7 @@ async function fetchOSMTileBatch() {
       osmTileHardFailCount.delete(k); // 【2026-07-21・修正5】成功したので諦めカウントも白紙に戻す
       gaveUpTiles.delete(k);
       osmTileTimeoutBoost.delete(k); // 【2026-07-21・Fable5相談】成功したので短いtimeout宣言に戻す
+      osmTileQueuedAt.delete(k); // 成功したので待ち時間計測も終了
       roadReadyTiles.add(k); // このタイルの道路が確定 → 建物生成待ちのチャンクを解放してよい
     });
     // loadOSM()(part6.js)は起動直後に「🗺 マップを読み込み中...」のstickyトーストを
@@ -897,7 +902,11 @@ function checkOSMTiles() {
   const queueTile = (wx, wz) => {
     const tx = Math.floor(wx / OSM_TILE_M), tz = Math.floor(wz / OSM_TILE_M);
     const key = `${tx},${tz}`;
-    if (!queuedTiles.has(key)) { queuedTiles.add(key); osmTileQueue.push({ tx, tz }); }
+    // 【2026-07-21・ユーザー要望】道路生成が「地形は緑なのに赤いまま」滞留するパターンの
+    // 診断用。新規キュー投入時刻を記録し、デバッグオーバーレイでfetching状態のタイルが
+    // 何ms待たされているかを見えるようにする(キュー優先順位の問題か、実際に取得に
+    // 時間がかかっているだけかを切り分ける)。
+    if (!queuedTiles.has(key)) { queuedTiles.add(key); osmTileQueue.push({ tx, tz }); osmTileQueuedAt.set(key, Date.now()); }
   };
   // 【2026-07-16】7x7(49タイル)→5x5(25タイル)に縮小。ジャンプ直後の初期バックログが
   // 半減し、近傍タイルの取得完了(=プレイ可能になるまでの体感待ち)が大幅に早くなる。

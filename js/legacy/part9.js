@@ -206,6 +206,11 @@ function updateDebugTileOverlay(force) {
     else if (!terrainReady) status = 'waitTerrain';
     else if (roadMeshPending > 0 || pending > 0) status = 'buildingPending';
     else status = 'done';
+    // 【2026-07-21・ユーザー要望】道路生成が「地形は緑なのに赤いまま」滞留するパターンの
+    // 診断用。fetching状態のタイルが初めてキューに入ってから何ms経過したかを見える化する
+    // (キューの優先順位が悪くて後回しにされているのか、優先度は正しいのに取得自体に
+    // 時間がかかっているだけかを切り分ける)。
+    const waitMs = (status === 'fetching') ? (Date.now() - (osmTileQueuedAt.get(key) || Date.now())) : 0;
     const cx = x0 + OSM_TILE_M / 2, cz = z0 + OSM_TILE_M / 2;
     // 【2026-07-19】中心の地面高さだけだと起伏のあるタイルで平面が地形に埋まって見えるため、
     // タイル内を3×3でサンプリングし一番高い点に合わせる(山がちなタイルでも埋まらない)。
@@ -239,12 +244,23 @@ function updateDebugTileOverlay(force) {
     // 眠っている分)を合算した1つの数字だけを表示しており、「今すぐ生成されそうな数」と
     // 「復帰待ちでまだ順番も回ってきていない数」の区別がつかず、密集地で「詰まっている」と
     // 誤読しやすかった(実態は復帰レート律速で正常な高止まり)。分けて出す。
-    logRows.push({ tile: key, status, road: roadReady, roadMeshPending, terrain: terrainReady, buildDone: done, buildQueued: pendingByTile.get(key) || 0, buildDormant: dormantByTile.get(key) || 0, fails: osmTileFailCount.get(key) || 0 });
+    logRows.push({ tile: key, status, road: roadReady, roadMeshPending, waitMs, terrain: terrainReady, buildDone: done, buildQueued: pendingByTile.get(key) || 0, buildDormant: dormantByTile.get(key) || 0, fails: osmTileFailCount.get(key) || 0 });
   }
   // 範囲外に出た平面は隠すだけ(破棄しない。再度範囲に入ったらそのまま使い回す)
   for (const [key, mesh] of debugTilePlanes) if (!seen.has(key)) mesh.visible = false;
   if (force || _debugTileFrame % 120 === 0) {
     console.table(logRows); // 詳細な数値は~2秒ごとにコンソールへ
+    // 【2026-07-21・ユーザー要望】道路生成が「地形は緑なのに赤いまま」滞留するパターンの
+    // 診断用。fetching状態のタイルのうち最も待ち時間が長いものを見て、キューの優先順位が
+    // 悪いのか(近傍タイルなのに何十秒も待たされている)、単に取得自体に時間がかかって
+    // いるだけなのか(osmTimeoutSecの範囲内で、他タイルより多少遅いだけ)を切り分ける。
+    let maxWait = 0, maxWaitTile = null, fetchingCount = 0;
+    for (const row of logRows) {
+      if (row.status !== 'fetching') continue;
+      fetchingCount++;
+      if (row.waitMs > maxWait) { maxWait = row.waitMs; maxWaitTile = row.tile; }
+    }
+    console.log('[roadgen] fetchingTiles', fetchingCount, 'maxWaitMs', maxWait, 'maxWaitTile', maxWaitTile);
     // 【2026-07-21・修正7(a)】全面赤(fetching)で停止するケースの切り分け用計器。
     // 仮説A(グローバル・クールダウンが429継続で実質恒久化)なら cooldown(ms) が常に正の値になる。
     // 仮説B(ワーカー枠のリーク)なら active=3 に張り付いたまま cooldown=0 で queue が減らない。

@@ -287,10 +287,21 @@ function checkNearTerrain() {
   if (nearLoading) return;
   const interval = 30 * Math.min(20, 1 + _nearFailCount); // 失敗するたび間隔を伸ばす(最大10秒)
   if ((++_nearCheckFrame) % interval !== 0) return;
+  // 【2026-07-21・Fable5診断(a)】以前はプレイヤーが窓の40%(NEAR_W=8000mなら3200m、
+  // 残り800m)まで近づいてから再取得を始めていた。ダッシュ(最大45m/s)だと800mは約18秒で
+  // 使い切ってしまい、密集地ではOSMタイル(3並列、タイル毎に独立進行)の方が地形NEAR
+  // (441点まとめて1回、数秒〜)より速く進むため、地形だけタイル突入直前まで未確定になる
+  // ケースが実機で報告された。取得完了まで旧窓を使い続ける挙動自体は正しい設計なので、
+  // (1)トリガー閾値を0.4→0.3(700m早める。残り猶予800m→2400m)に前倒しし、
+  // (2)新しい窓の中心を「プレイヤー位置」ではなく「プレイヤー位置+進行方向×窓幅0.25」
+  // にすることで、進行方向側の実質的な猶予をさらに広げる(停止中/方向不明時は
+  // _osmMoveUx/Uz=0になり従来通りプレイヤー位置そのものが中心になる)。
   if (!nearElev ||
-      Math.abs(player.position.x - nearCX) > NEAR_W * 0.4 ||
-      Math.abs(player.position.z - nearCZ) > NEAR_D * 0.4) {
-    loadNearTerrain(player.position.x, player.position.z);
+      Math.abs(player.position.x - nearCX) > NEAR_W * 0.3 ||
+      Math.abs(player.position.z - nearCZ) > NEAR_D * 0.3) {
+    const biasedCX = player.position.x + _osmMoveUx * NEAR_W * 0.25;
+    const biasedCZ = player.position.z + _osmMoveUz * NEAR_D * 0.25;
+    loadNearTerrain(biasedCX, biasedCZ);
   }
 }
 
