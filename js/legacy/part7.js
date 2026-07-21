@@ -893,5 +893,21 @@ function floorHeightAt(x, z, fromY) {
       if (top > fy) fy = top;
     }
   }
+  // 【2026-07-21・橋対応】橋(bridge=yes等)の桁。motorwaySlopesと全く同じ考え方
+  // (2端点間の直線を数式で評価)。これが無いと、見た目の橋メッシュは地形に沈まなく
+  // なった後も、足元の判定だけは相変わらず生の地形(=川底相当の低い高さ)を見ていて、
+  // 橋の上に乗ろうとした瞬間そこに何も無く沈んでいってしまう。
+  for (const sl of bridgeSlopes) {
+    const dx = x - sl.x1, dz = z - sl.z1;
+    const along = dx * sl.nx + dz * sl.nz;
+    if (along < 0 || along > sl.len) continue;
+    const across = dx * -sl.nz + dz * sl.nx;
+    if (Math.abs(across) > sl.hw + 0.3) continue;
+    const deckY = sl.y1 + (sl.y2 - sl.y1) * (along / sl.len);
+    if (deckY <= fromY + 0.5) {
+      const top = deckY + 0.35;
+      if (top > fy) fy = top;
+    }
+  }
   return fy;
 }

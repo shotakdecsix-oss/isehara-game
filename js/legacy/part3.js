@@ -899,6 +899,45 @@ function addFireTower(x, z) {
   bell.position.set(x, gy + 9.6, z); scene.add(bell);
 }
 
+// 【2026-07-21・河口部対応】橋のアンカー(入口・出口ノード)がそのまま渚際/河口にあると、
+// そこの地形サンプリングが実質「海」(データ無し=oceanFloor、または渇水面ぎりぎりの低い値)
+// を拾ってしまい、アンカー自体が海面相当まで沈み、橋全体がその低いアンカー間で
+// 補間されて波打つ海面プレーンの下に沈んで見える(実機報告: 東品川、河口付近の国道橋)。
+// 現実の橋台・堤防は渇水面よりある程度高い位置にあるはず、という前提でアンカー高さに
+// 最低クリアランスを設ける(通常の内陸の橋・谷を渡る橋は元々ずっと高いのでこの底上げは
+// 効かず、影響を受けるのは河口・海際の低いアンカーだけに限られる)。
+// 【重要】基準にするのは可変のSEA_Y(ユーザーが海面調整スライダーで動かせる、表示用の値)
+// ではなく、常に実標高0m(seaLevelMに関係なく固定)。スライダーを動かしても既存の道路・
+// 橋メッシュは即座に作り直さない設計(ユーザー判断: 現実的でないため)なので、もし可変の
+// SEA_Yを基準にすると、スライダーを動かした後に新しく生成される橋だけ基準がズレて
+// 混在してしまう。実標高0m基準なら地点・タイミングに関わらず常に同じ結果になる。
+const BRIDGE_MIN_CLEARANCE_M = 1.5; // 実標高0mからの最低クリアランス(実length, m)
+
+// 【2026-07-21・橋対応】橋区間の両端の高さ(bridgeInfo.ax/az/bx/bzの地形高さをfracA/fracBで
+// 線形補間したもの)を求める共通ヘルパー。見た目(makeRoadGeo)と足場判定(bridgeSlopes/
+// floorHeightAt)の両方がこれを使うことで、常に同じ高さになることを保証する
+// (別々に計算式を持つと将来どちらかだけ直し忘れてズレる)。
+function bridgeSegmentY(bridgeInfo) {
+  // 実標高0m(海面調整スライダーの影響を受けない固定基準)のゲーム高さ。SEA_Yの式から
+  // seaLevelM部分だけ外し、常に0m基準にしたもの。
+  const trueSeaY = -elevBase * ELEV_SCALE;
+  const floor = trueSeaY + BRIDGE_MIN_CLEARANCE_M * ELEV_SCALE;
+  const yA0 = Math.max(getGroundY(bridgeInfo.ax, bridgeInfo.az), floor);
+  const yB0 = Math.max(getGroundY(bridgeInfo.bx, bridgeInfo.bz), floor);
+  return { yA: yA0 + (yB0 - yA0) * bridgeInfo.fracA, yB: yA0 + (yB0 - yA0) * bridgeInfo.fracB };
+}
+
+// 橋(bridge=yes等)の「乗れる床」。motorwaySlopes(高速道路の桁)と全く同じ考え方で、
+// Box3の水平積み重ねではなく2端点を結ぶ斜面を1つの数式として持ち、floorHeightAt側で
+// その場のx,zに応じた高さをその都度計算する(段差なく滑らかに繋がる)。
+// 【重要】最初にmakeRoadGeoで見た目の橋が地形に沈む不具合を直したが、floorHeightAtは
+// 別の場所でgetGroundY(生の地形)だけを見て足場の高さを決めていたため、見た目の橋の上に
+// 立とうとしてもそこには当たり判定が無く、地形(川底相当)まで沈んでいく不具合が残っていた
+// (motorwayは元々このbridgeSlopes相当のmotorwaySlopesを持っていたので影響を受けなかった)。
+// wouldCollide(横移動のブロック)には登録しない(motorwaySlopesと同じ理由。橋は上に
+// 乗る床であって壁ではないため)。
+const bridgeSlopes = [];
+
 // Build a terrain-following road ribbon as a single BufferGeometry mesh
 // 【2026-07-21・橋対応】bridgeInfoが渡された場合({ax,az,bx,bz,fracA,fracB} = 橋全体の
 // 入口・出口の座標と、このセグメントが橋全体の中で占める道なり距離の割合。part8.js参照)、
@@ -925,9 +964,8 @@ function makeRoadGeo(x1, z1, x2, z2, width, yOffset, bridgeInfo) {
   // 橋区間: 入口・出口の地形高さをこの構築タイミングで取り直し、区間の両端の高さを確定する
   let bridgeYA = null, bridgeYB = null;
   if (bridgeInfo) {
-    const yA0 = getGroundY(bridgeInfo.ax, bridgeInfo.az), yB0 = getGroundY(bridgeInfo.bx, bridgeInfo.bz);
-    bridgeYA = yA0 + (yB0 - yA0) * bridgeInfo.fracA;
-    bridgeYB = yA0 + (yB0 - yA0) * bridgeInfo.fracB;
+    const bh = bridgeSegmentY(bridgeInfo);
+    bridgeYA = bh.yA; bridgeYB = bh.yB;
   }
 
   const verts = [], idxs = [], uvs = [];
@@ -1034,7 +1072,16 @@ function addRoad(x1, z1, x2, z2, width, type='road', bridgeY=null) {
   // railWhiteは距離アンロード(unloadFarRoads)/復元(rebuildRoadMesh)で本体と一緒に扱う。
   // 【重要】重いメッシュ生成はここでは行わず、レコード登録+フレーム分割キュー投入だけにする
   // (密集タイル到着時の数十秒フリーズ対策。isOnRoad・ミニマップはレコードだけで正しく動く)。
-  const rec = {x1, z1, x2, z2, type, rw: w, mesh: null, mat, yOff, railWhite: null, bridgeY};
+  const rec = {x1, z1, x2, z2, type, rw: w, mesh: null, mat, yOff, railWhite: null, bridgeY, slope: null};
+  // 橋区間: 見た目(makeRoadGeoが使うbridgeY)と同じ高さで「乗れる床」もここで登録する。
+  // 直前にbridgeSegmentYで求めた高さをそのままslopeへ焼き込み、NEAR地形更新時は
+  // rebuildRoadMesh側でこのslopeを見た目と一緒に更新し続ける(常に同じ計算式を使うため、
+  // 見た目と足場がズレることはない)。
+  if (bridgeY) {
+    const bh = bridgeSegmentY(bridgeY);
+    rec.slope = { x1, z1, y1: bh.yA, x2, z2, y2: bh.yB, nx: dx/totalLen, nz: dz/totalLen, len: totalLen, hw: w/2 };
+    bridgeSlopes.push(rec.slope);
+  }
   addRoadRecord(rec);
   queueRoadMesh(rec);
 

@@ -446,6 +446,14 @@ function rebuildRoadMesh(r) {
   if (r.type === 'motorway') { if (r.mesh) rebuildMotorwayMesh(r); return; } // 高架はアンロード対象外(常にmesh有り)
   const geo = makeRoadGeo(r.x1, r.z1, r.x2, r.z2, r.rw, r.yOff, r.bridgeY);
   if (!geo) return;
+  // 橋区間: 見た目のジオメトリと同じタイミングで「乗れる床」(bridgeSlopes)も
+  // 同じ高さへ更新する(bridgeSegmentYで両方が全く同じ式を使うため、見た目と
+  // 足場が食い違うことはない)。これが無いと、地形が沈んで見えるのは直っても
+  // 実際に立とうとすると当たり判定だけ古い/地形のままで下に沈み続ける不具合になる。
+  if (r.bridgeY && r.slope) {
+    const bh = bridgeSegmentY(r.bridgeY);
+    r.slope.y1 = bh.yA; r.slope.y2 = bh.yB;
+  }
   if (r.mesh) {
     r.mesh.geometry.dispose();
     r.mesh.geometry = geo;
