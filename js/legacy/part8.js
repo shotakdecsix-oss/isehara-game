@@ -1355,8 +1355,9 @@ function generateTownRow(cx, cz, inAvoid) {
     .filter(r => r.type !== 'water' && r.type !== 'railway');
   if (roads.length === 0) {
     // 近くに道が無ければ集落よりやや多めのランダム散布にフォールバック
-    // 【2026-07-24】町並みがスカスカという指摘への対応で+1(江戸4-6/明治5-7)
-    const n = (MODE === 'edo' ? 4 : 5) + (Math.random() * 3 | 0);
+    // 【2026-07-24】農村側(placeMachiya呼び出し元)を大幅に引き上げたのに合わせ、
+    // 町場の道路無しフォールバックも同水準まで引き上げる(江戸6-9/明治8-11)
+    const n = (MODE === 'edo' ? 6 : 8) + (Math.random() * 4 | 0);
     for (let i = 0; i < n; i++)
       placeMachiya(cx + (Math.random() - 0.5) * 90, cz + (Math.random() - 0.5) * 90, inAvoid);
     return;
@@ -1366,11 +1367,11 @@ function generateTownRow(cx, cz, inAvoid) {
     const len = Math.sqrt(dx * dx + dz * dz);
     if (len < 8) continue;
     const px = -dz / len, pz = dx / len;
-    for (let s = 3; s < len - 2; s += 6 + Math.random() * 2) { // 【2026-07-24】間隔を詰めて町並みを密に(旧: 7+rand*2.5)
+    for (let s = 3; s < len - 2; s += 5 + Math.random() * 1.5) { // 【2026-07-24】さらに間隔を詰める(旧: 6+rand*2)
       const rx = r.x1 + dx * (s / len), rz = r.z1 + dz * (s / len);
       if (rx < cx - 50 || rx >= cx + 50 || rz < cz - 50 || rz >= cz + 50) continue; // このセル担当分のみ(二重生成防止)
       for (const side of [-1, 1]) {
-        if (Math.random() < 0.1) continue; // 町並みに抜けを少し残す(旧: 0.15)
+        if (Math.random() < 0.05) continue; // 町並みに抜けを少し残す(旧: 0.1)
         const off = (r.rw || 4) / 2 + 2.6 + Math.random() * 1.2;
         placeMachiya(rx + px * side * off, rz + pz * side * off, inAvoid);
       }
@@ -1404,9 +1405,15 @@ function generateMeijiCells(x0, z0, x1, z1, inAvoid) {
           generateTownRow(cx, cz, inAvoid); // 町場: 街道沿いに町家を連ねる
         } else {
           // 農村: 茅葺き民家の集落(江戸は明治より開発途上のため、集落あたりの軒数を減らす)
-          // 【2026-07-24】100m四方に1-4軒(江戸)/2-5軒(明治)は体感でスカスカという指摘への
-          // 対応で+1(江戸2-5/明治3-6)。
-          const n = (MODE === 'edo' ? 2 : 3) + (Math.random() * 3 | 0);
+          // 【2026-07-24】実際の江戸期の村は1村平均40-50軒/人口約400人・耕地50町歩程度
+          // (出典: 検地record例。古文書ネット等)だが、これは耕地を含む行政単位「村」全体の
+          // 数字であり、家屋はその全域に均等分布するのではなく街道沿い等の集落コア部分に
+          // 集まっていた。このcode===6セルはまさにその集落コア部分(迅速測図が「村落」と
+          // 分類した100m四方)を指すため、単純な平均分割よりずっと高い密度が実態に近い。
+          // 前回の2-5/3-6軒はそれでも過小と判断し、大幅に引き上げる(江戸5-9/明治7-11)。
+          // 敷地の当たり判定(hasBuildingNearby)が自然に頭打ちにするため、上げすぎても
+          // 詰まりすぎた見た目にはならない。
+          const n = (MODE === 'edo' ? 5 : 7) + (Math.random() * 4 | 0);
           for (let i = 0; i < n; i++) {
             const hx = cx + (Math.random() - 0.5) * 80, hz = cz + (Math.random() - 0.5) * 80;
             const bw = 7 + Math.random() * 4, bd = 6 + Math.random() * 3;
