@@ -984,6 +984,15 @@ const LANDMARK_TOWER_NAMES = {
   // 【2026-07-24追加】世界的ランドマーク第1弾。OSMの主name(現地語)+name:en+name:jaの
   // どれかに完全一致すれば検出する(東京タワー等と同じ完全一致方式。誤爆防止のため)。
   'Tour Eiffel': 'eiffel_tower', 'Eiffel Tower': 'eiffel_tower', 'エッフェル塔': 'eiffel_tower',
+  // 【2026-07-24追加】世界的ランドマーク第2弾(「塔・タワー系」で先細り角柱の使い回しが
+  // 効きやすい形状のみ抽出)。
+  'Big Ben': 'big_ben', 'Elizabeth Tower': 'big_ben', 'ビッグベン': 'big_ben', 'エリザベスタワー': 'big_ben',
+  'Torre di Pisa': 'pisa_tower', 'Leaning Tower of Pisa': 'pisa_tower', 'ピサの斜塔': 'pisa_tower',
+  'CN Tower': 'cn_tower', 'Tour CN': 'cn_tower', 'CNタワー': 'cn_tower',
+  'Empire State Building': 'empire_state', 'エンパイアステートビル': 'empire_state',
+  'Burj Khalifa': 'burj_khalifa', 'برج خليفة': 'burj_khalifa', 'ブルジュ・ハリファ': 'burj_khalifa', 'ブルジュハリファ': 'burj_khalifa',
+  'Space Needle': 'space_needle', 'スペースニードル': 'space_needle',
+  'Washington Monument': 'washington_monument', 'ワシントン記念塔': 'washington_monument', 'ワシントンモニュメント': 'washington_monument',
 };
 function detectLandmarkTower(tags) {
   if (MODE !== 'real') return null; // 現実モード限定(江戸/明治は別途shrine/temple以外を描画しない既存フィルタで弾かれる)

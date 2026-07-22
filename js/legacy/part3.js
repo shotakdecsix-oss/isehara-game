@@ -123,10 +123,16 @@ function tintWall(c) {
 // 東京タワー/スカイツリー/大阪城/京都タワーは、実測タグを汎用ルールに流すと「巨大な箱ビル」
 // にしかならず似ても似つかない。名前検出(part2.js detectLandmarkTower)された建物だけ、
 // ここで手組みの専用ジオメトリを組み立てる。高さはpart8.jsで実際の高さに上書き済み。
-const LANDMARK_TOWER_HEIGHT = { tokyo_tower: 333, skytree: 634, osaka_castle: 55, kyoto_tower: 131, eiffel_tower: 330 };
+const LANDMARK_TOWER_HEIGHT = {
+  tokyo_tower: 333, skytree: 634, osaka_castle: 55, kyoto_tower: 131, eiffel_tower: 330,
+  // 【2026-07-24追加】世界的ランドマーク第2弾(塔・タワー系)
+  big_ben: 96, pisa_tower: 56, cn_tower: 553, empire_state: 443,
+  burj_khalifa: 828, space_needle: 184, washington_monument: 169,
+};
 const LM_ORANGE = 0xE8541E, LM_WHITE = 0xF2F0E8, LM_STEEL = 0xE6E9EA, LM_STEEL_DK = 0xC7CCCE,
       LM_CASTLE_WALL = 0xF5F0E6, LM_CASTLE_BAND = 0x2A2620, LM_CASTLE_ROOF = 0x2E5D45, LM_GOLD = 0xD4AF37,
-      LM_KYOTO = 0xEDE6D6, LM_RED = 0xCC2211, LM_IRON = 0x5C4632, LM_IRON_DK = 0x3E2F20;
+      LM_KYOTO = 0xEDE6D6, LM_RED = 0xCC2211, LM_IRON = 0x5C4632, LM_IRON_DK = 0x3E2F20,
+      LM_STONE = 0xC9BC9C, LM_SLATE = 0x445542;
 function drawLandmarkTower(dm, x, gy, z, kind) {
   // 四角い先細り角柱を1段。y0=段の底(地表からの高さ)、ht=段の高さ、rBase=底面の半幅相当。
   const sq = (mat, y0, ht, rBase) => dm(UNIT_TAPER4, mat, x, gy + y0 + ht / 2, z, rBase * 2, ht, rBase * 2);
@@ -137,7 +143,8 @@ function drawLandmarkTower(dm, x, gy, z, kind) {
         mRed = lambertMat(LM_RED, 0x330000), mGold = lambertMat(LM_GOLD),
         mCastleWall = lambertMat(LM_CASTLE_WALL), mCastleBand = lambertMat(LM_CASTLE_BAND),
         mCastleRoof = lambertMat(LM_CASTLE_ROOF), mKyoto = lambertMat(LM_KYOTO),
-        mIron = lambertMat(LM_IRON), mIronDk = lambertMat(LM_IRON_DK);
+        mIron = lambertMat(LM_IRON), mIronDk = lambertMat(LM_IRON_DK),
+        mStone = lambertMat(LM_STONE), mSlate = lambertMat(LM_SLATE);
 
   if (kind === 'tokyo_tower') {
     sq(mOrange, 0, 150, 17);            // 脚〜大展望台
@@ -190,6 +197,64 @@ function drawLandmarkTower(dm, x, gy, z, kind) {
     rd(mIronDk, 276, 46, 2); // アンテナ支柱(330mまで)
     dm(UNIT_SPH, mRed, x, gy + 328, z, 1.5, 1.5, 1.5); // 航空障害灯
     addDecorLight(0xffcc66, 0.7, 22, x, gy + 280, z);  // 夜間のシャンパンゴールド照明を示唆
+  } else if (kind === 'big_ben') {
+    // 【2026-07-24追加】世界的ランドマーク第2弾。ネオゴシックの時計塔。石造りの塔身+
+    // 時計盤のある明るい帯+鐘楼+四角錐の尖塔、という積み重ねで近似(96m)。
+    sq(mStone, 0, 55, 7);            // 塔身(地上〜時計盤下)
+    sq(mGold, 55, 7, 6.3);           // 時計盤のある区画(金の帯で表現)
+    sq(mStone, 62, 13, 5.5);         // 鐘楼
+    dm(UNIT_CONE4, mSlate, x, gy + 75 + 10.5, z, 11, 21, 11, 0); // 四角錐の尖塔(96mまで)
+    dm(UNIT_SPH, mGold, x, gy + 96.3, z, 0.6, 0.6, 0.6);         // 尖塔先端の飾り
+  } else if (kind === 'pisa_tower') {
+    // 【2026-07-24追加】世界的ランドマーク第2弾。円柱を8段積み、上に行くほどx方向へ
+    // わずかにずらすことで「傾き」を表現する(専用の傾斜ジオメトリは使わず既存disc流用)。
+    const totalH = 56, tiers = 8, tierH = totalH / tiers, leanMax = 4;
+    for (let i = 0; i < tiers; i++) {
+      const y0 = i * tierH;
+      const lean = leanMax * (y0 / totalH);
+      const r = 7 - i * 0.15;
+      dm(UNIT_CYL, mWhite, x + lean, gy + y0 + tierH / 2, z, r * 2, tierH, r * 2);
+    }
+  } else if (kind === 'cn_tower') {
+    // 【2026-07-24追加】世界的ランドマーク第2弾。細い塔身+特徴的な太い円盤展望台(メインポッド)
+    // +先細りアンテナマストの3段構成(553m)。
+    sq(mSteel, 0, 342, 15);           // 地上〜メインポッド下
+    disc(mSteelDk, 342, 18, 24);      // メインポッド(太い円盤の展望台)
+    sq(mSteel, 366, 20, 5);           // ポッド〜マスト基部
+    rd(mWhite, 386, 167, 2);          // 先細りアンテナマスト(553mまで)
+    dm(UNIT_SPH, mRed, x, gy + 551, z, 1.5, 1.5, 1.5);
+    addDecorLight(0xff2200, 0.7, 25, x, gy + 345, z);
+  } else if (kind === 'empire_state') {
+    // 【2026-07-24追加】世界的ランドマーク第2弾。アールデコのセットバック積層を単純化し、
+    // 主要棟体+塔状部分+アンテナマストの3段で近似(443m)。
+    sq(mSteel, 0, 320, 30);           // 主要棟体
+    sq(mSteelDk, 320, 60, 18);        // 上部の塔状部分(展望台含む)
+    sq(mWhite, 380, 20, 8);           // アンテナ基部の尖塔部
+    rd(mWhite, 400, 43, 2);           // 先端アンテナマスト(443mまで)
+    dm(UNIT_SPH, mRed, x, gy + 441, z, 1.2, 1.2, 1.2);
+    addDecorLight(0xffffff, 0.6, 20, x, gy + 385, z);
+  } else if (kind === 'burj_khalifa') {
+    // 【2026-07-24追加】世界的ランドマーク第2弾。段々に細くなるY字プランを単純な先細り
+    // 角柱の重ね(3段)+先端スパイアで近似(828m、現在世界一高い建物)。
+    sq(mSteel, 0, 400, 33);
+    sq(mSteelDk, 400, 250, 22);
+    sq(mSteel, 650, 120, 11);
+    rd(mSteelDk, 770, 58, 3);         // 尖塔スパイア(828mまで)
+    dm(UNIT_SPH, mRed, x, gy + 826, z, 1.2, 1.2, 1.2);
+    addDecorLight(0xffffff, 0.7, 30, x, gy + 700, z);
+  } else if (kind === 'space_needle') {
+    // 【2026-07-24追加】世界的ランドマーク第2弾。裾広がりの脚+細い支柱+特徴的な
+    // 円盤形展望台(ソーサー)+先端アンテナの構成(184m)。
+    sq(mSteel, 0, 5, 14);             // 脚の広がる裾野
+    rd(mSteel, 5, 130, 4);            // 細い支柱
+    disc(mSteelDk, 135, 21, 14);      // 展望台の円盤(ソーサー型)
+    rd(mWhite, 149, 35, 1.5);         // アンテナマスト(184mまで)
+    addDecorLight(0xffffff, 0.6, 22, x, gy + 140, z);
+  } else if (kind === 'washington_monument') {
+    // 【2026-07-24追加】世界的ランドマーク第2弾。白い大理石の先細りオベリスク+
+    // ピラミッド型の尖頂(169m)。他のランドマークと違い装飾灯なし(実物も控えめなため)。
+    sq(mWhite, 0, 160, 8.7);          // オベリスク本体
+    dm(UNIT_CONE4, mWhite, x, gy + 160 + 4.5, z, 17.4, 9, 17.4, 0); // ピラミッド型先端(169mまで)
   }
 }
 
