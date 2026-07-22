@@ -520,7 +520,11 @@ function localModernDensity(gx, gz) { // 周辺3×3セル(300m四方)合計(1セ
       n += modernBuildingDensity.get((gx + dx) + ',' + (gz + dz)) || 0;
   return n;
 }
-const TOWN_TIER_MIN = 8; // 300m四方の現代建物棟数がこれ以上なら「町場(宿場町・城下町)」ティアとみなす
+// 【2026-07-24】8だと現代の中規模な住宅地(300m四方に建物6〜7棟程度)まで「村落」判定に
+// 落ち、村落側の軒数(下記generateMeijiCells参照)が少ないせいで明治・江戸モードの
+// 町並みが全体的にスカスカに見えるという指摘への対応。閾値を下げ、街道沿いの町家並び
+// (generateTownRow。道路沿いに詰めて配置するので体感密度が高い)により多くの区画を回す。
+const TOWN_TIER_MIN = 5; // 300m四方の現代建物棟数がこれ以上なら「町場(宿場町・城下町)」ティアとみなす
 
 // 【2026-07-17】meijiMeshCodeはjs/lib/pure.jsへ移動(CODE_REVIEW_20260717 P13-1)。
 
