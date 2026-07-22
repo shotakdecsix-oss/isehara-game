@@ -1154,7 +1154,7 @@ function unloadFarBuildings(force) {
 //   ポップインちらつきも無い)。
 const LOWRISE_CULL_ALT_M = 30;   // 実メートル。これより高く浮上している時だけ発動(2026-07-24: 70→30に緩和)
 const LOWRISE_CULL_H_MAX = 10;   // 実メートル。これ未満の高さの建物だけ対象(低層。2026-07-24: 20→10に縮小、風景が寂しくなりすぎるとの指摘のため)
-const LOWRISE_CULL_NEAR_M = 1000; // 実メートル。これより近い建物は常に表示(遠景のみ間引く。2026-07-24: 400→1000に拡大)
+const LOWRISE_CULL_NEAR_M = 2000; // 実メートル。これより近い建物は常に表示(遠景のみ間引く。2026-07-24: 400→1000→2000に拡大)
 let _lowriseCullFrame = 0;
 function updateFarLowriseCull() {
   _lowriseCullFrame++;
