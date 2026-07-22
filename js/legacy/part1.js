@@ -345,6 +345,10 @@ const scene = new THREE.Scene();
 // 宇宙は大気(=光の散乱)が無い設定なので、遠くまでくっきり見えるようフォグをごく薄くする。
 const WORLD_FOG = new THREE.FogExp2(MODE_CONF.fog, MODE === 'meiji' ? 0.0004 : MODE === 'space' ? 0.00008 : 0.00056); // 毎フレーム new しない(GC対策)
 scene.fog = WORLD_FOG;
+// 【2026-07-23追加】夜は元のフォグ濃度を基準に少し薄くし、遠くの窓明かりが霞まず届くようにする
+// (applyTimeOfDayで毎回この基準値から計算し直す。density自体を直接書き換え続けると
+// 呼ぶたびに薄くなり続けるバグになるため、必ずこの定数を起点にする)。
+const BASE_FOG_DENSITY = WORLD_FOG.density;
 
 // 宇宙は遠景メッシュ(半径6km)がカバーする範囲まで見えるよう視界を伸ばす(他モードは従来通り)
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.5, MODE === 'space' ? 5800 : 5000);
@@ -506,15 +510,17 @@ function applyTimeOfDay() {
   if (starMesh) starMesh.material.opacity = night;
   // 松明は夜だけ灯す(昼間に暖色の点光源が浮くのを防ぐ)
   torchLights.forEach(l => { l.intensity = 0.1 + night * 1.1; });
-  // 【2026-07-23追加】ビルの窓明かり(夜景)を時間帯に連動させる。従来は常に一定の
-  // emissiveIntensityで焼き込んでいたため昼夜を問わず窓が光って見えていた。
+  // 【2026-07-23追加・24追加で増光】ビルの窓明かり(夜景)を時間帯に連動させる。従来は
+  // 常に一定のemissiveIntensityで焼き込んでいたため昼夜を問わず窓が光って見えていた。
   // ここでは新規テクスチャ/ジオメトリを一切増やさず、既存の共有マテリアル
   // (facadeCache、part2.js)のemissiveIntensityだけを毎分(このapplyTimeOfDay呼び出し
   // タイミング)まとめて書き換える — 過去のGPUクラッシュ対策(テクスチャ増加NG)と両立する。
-  // 昼は控えめ(0.15倍)、夜は元の設計値よりやや強め(最大1.15倍)にして
-  // 「暗くなるほど窓明かりが際立つ」夜景らしいコントラストを出す。
+  // ユーザー要望「もっと明るく・遠景でも」を受けて、夜の上限を1.15倍→3.2倍まで大幅増光。
+  // あわせて、夜だけフォグ密度を基準値から4割ほど薄くし(下記WORLD_FOG.density)、
+  // 遠くの窓明かりがフォグに霞んで見えなくなるのを防ぐ(昼のフォグは従来どおり)。
+  WORLD_FOG.density = BASE_FOG_DENSITY * (1 - night * 0.4);
   if (typeof facadeCache !== 'undefined') {
-    const winGlow = 0.15 + night * 1.0;
+    const winGlow = 0.2 + night * 3.0;
     facadeCache.forEach((mat) => {
       const base = mat.userData && mat.userData.baseEmi != null ? mat.userData.baseEmi : 0.85;
       mat.emissiveIntensity = base * winGlow;
