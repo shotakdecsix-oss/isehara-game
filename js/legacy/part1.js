@@ -1152,7 +1152,7 @@ function unloadFarBuildings(force) {
 // ・ユーザー要望により、間引くのは「遠景の低層」だけ(近くの建物・高層ビルは常に表示、
 //   スカイライン自体は維持する)。disposeはせずvisibleの切り替えのみ行う(復帰コスト0、
 //   ポップインちらつきも無い)。
-const LOWRISE_CULL_ALT_M = 70;   // 実メートル。これより高く浮上している時だけ発動
+const LOWRISE_CULL_ALT_M = 30;   // 実メートル。これより高く浮上している時だけ発動(2026-07-24: 70→30に緩和)
 const LOWRISE_CULL_H_MAX = 20;   // 実メートル。これ未満の高さの建物だけ対象(低層)
 const LOWRISE_CULL_NEAR_M = 400; // 実メートル。これより近い建物は常に表示(遠景のみ間引く)
 let _lowriseCullFrame = 0;
