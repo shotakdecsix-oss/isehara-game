@@ -517,6 +517,27 @@ function osmCachePut(key, data) { // fire-and-forget
   });
 }
 
+// ---- 【2026-07-24追加】設定画面からの明示的な全データクリア用 ----
+// 地形/道路/建物そのもの(buildingRecords/roadRecords等)はページ再読み込みだけで確実に
+// リセットされる(いずれもモジュールスコープ変数のため)。しかし唯一「再読み込みしても
+// 消えないもの」= このIndexedDBタイルキャッシュだけは、壊れた/古い応答を溜め込んでいると
+// リロードしても同じ滞留を再現してしまう。そのため明示リフレッシュではこれを丸ごと削除し、
+// 現在地の全タイルを新規にOverpassから取り直させる。
+function clearOsmTileCache() {
+  return new Promise((resolve) => {
+    try {
+      if (_osmDBPromise) _osmDBPromise.then((db) => { try { if (db) db.close(); } catch (e) {} });
+    } catch (e) {}
+    _osmDBPromise = null;
+    try {
+      const req = indexedDB.deleteDatabase('osmTileCache');
+      req.onsuccess = () => resolve();
+      req.onerror = () => resolve();
+      req.onblocked = () => resolve(); // 他タブが開いていて即時削除できなくても、リロード自体は進める
+    } catch (e) { resolve(); }
+  });
+}
+
 // 【2026-07-21・Fable5相談】429を受けた時、実際にあと何秒待てばスロットが空くのかを
 // /api/status(このエンドポイント自体はレート制限の消費対象外・軽量)で確認する。
 // "Slot available after: <timestamp>, in N seconds." という行が空きスロット数だけ

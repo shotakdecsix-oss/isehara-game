@@ -327,6 +327,12 @@ body.uiHidden #uiToggleBtn { opacity:0.45; }
       <button id="debugTileBtn" data-i18n="debugTileBtn">🩺 タイル状況</button>
     </div>
     <div id="perfDesc" data-i18n="debugTileDesc">デバッグ用: 周囲のOSMタイルごとの取得・生成状況を色分け表示します(灰=未取得 赤=取得中 青=地形待ち 橙=生成中 緑=完了)</div>
+    <!-- 2026-07-24: 読み込み・生成が滞って直らない時の最終手段。今すぐ整理(GPUメッシュ解放のみ・
+         記録は保持)とは異なり、タイルキャッシュ(IndexedDB)ごと消して現在地のまま再読み込みする。 -->
+    <div class="charRow">
+      <button id="hardResetBtn" data-i18n="hardResetBtn">🔄 データを全消去して再読込</button>
+    </div>
+    <div id="perfDesc" data-i18n="hardResetDesc">読み込み・生成が滞って直らない時用: 保持している地形・道路・線路・建物データとキャッシュを全て消去し、現在地のまま再読み込みします(今すぐ整理より強力ですが、再読み込みが発生します)</div>
   </div>
 
   <div class="settingsSection">

@@ -690,6 +690,30 @@ if (debugTileBtn) {
   });
 }
 
+// ======= 「データを全消去して再読込」ボタン =======
+// 【2026-07-24追加】ユーザー要望: 読み込み・生成がどうしても滞ってしまう時に、明示的に
+// 全データをクリアしてやり直したい。「今すぐ整理」はGPUメッシュを解放するだけで記録
+// (buildingRecords/roadRecords等)やIndexedDBタイルキャッシュは温存するため、キャッシュ
+// 自体が壊れている/古いケースには効かない。こちらは現在地・向きを保存した上でIndexedDB
+// タイルキャッシュを丸ごと削除してからリロードし、現在地周辺を完全に新規取得させる
+// (地形/道路/建物のJS側の記録はリロード自体で自動的にリセットされるので個別に消す必要はない)。
+const hardResetBtn = document.getElementById('hardResetBtn');
+if (hardResetBtn) {
+  hardResetBtn.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    if (!confirm(t('hardResetConfirm'))) return;
+    hardResetBtn.disabled = true;
+    hardResetBtn.textContent = t('hardResetProgress');
+    try {
+      const ll = xzToLatLon(player.position.x, player.position.z);
+      localStorage.setItem('iseharaResumePos',
+        JSON.stringify({ lat: ll.lat, lon: ll.lon, yaw: camYaw, rot: player.rotation.y }));
+    } catch (err) {}
+    try { await clearOsmTileCache(); } catch (err) {}
+    location.reload();
+  });
+}
+
 // ======= キャラクター選択(パネル内、⚙で開閉) =======
 document.getElementById('charBoyBtn').addEventListener('click', (e) => { e.stopPropagation(); setCharacterSex('boy'); });
 document.getElementById('charGirlBtn').addEventListener('click', (e) => { e.stopPropagation(); setCharacterSex('girl'); });
