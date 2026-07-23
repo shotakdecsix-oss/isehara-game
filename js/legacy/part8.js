@@ -1386,7 +1386,13 @@ function generateMeijiCells(x0, z0, x1, z1, inAvoid) {
       let code = meijiCells.get(gx + ',' + gz);
       const cx = gx * 100, cz = gz * 100;
       if (cx < x0 || cx >= x1 || cz < z0 || cz >= z1) continue; // 中心点が担当チャンク内のセルのみ(二重生成防止)
-      const isTown = localModernDensity(gx, gz) >= TOWN_TIER_MIN; // 現代建物密度から「町場」ティアを判定
+      // 【2026-07-25】実測の江戸期データ(town/road)が使える場所ではそちらを優先する。
+      // 現代密度ヒューリスティックはあくまで実データの無い場所(伊勢原等)向けの推定値であり、
+      // 実際に町家があった/街道が通っていたと分かっている場所ではその事実を優先すべきため。
+      // (edoRealDataReadyが未読み込み、またはカバー範囲外の場所ではfalseになり、
+      //  従来どおりlocalModernDensityだけで判定される)
+      const isTown = (edoRealDataReady && (isInEdoMachiyaArea(cx, cz) || nearEdoHistoricalRoad(cx, cz, 40))) ||
+        localModernDensity(gx, gz) >= TOWN_TIER_MIN; // 現代建物密度から「町場」ティアを判定
       if (!code) {
         // 迅速測図のメッシュデータが無い区画(対象外エリアなど)。現代密度が高ければ
         // 集落があった可能性が高いとみなしてフォールバックし、密度が低ければ何もしない

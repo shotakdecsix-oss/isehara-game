@@ -102,6 +102,7 @@ const I18N = {
     mapPartialFailToast: '⚠️ 地図取得が一部失敗しました(背景で再試行を続けます)',
     meijiCreditBase: '明治期土地利用: 出典 <a href="https://habs.rad.naro.go.jp/" target="_blank" style="color:#cdb">農研機構農業環境研究部門</a>(迅速測図・CC BY 4.0)',
     meijiCreditEdoNote: '<br>※江戸期の実測地図が無いため、明治期データを近似として使用しています',
+    edoRealDataCredit: '<br>江戸期街道・町家領域: 出典 <a href="https://codh.rois.ac.jp/historical-gis/" target="_blank" style="color:#cdb">ROIS-DS人文学オープンデータ共同利用センター</a>「江戸主要街道データセット」「『江戸切絵図』町家領域データセット」・<a href="https://rekichizu.jp/" target="_blank" style="color:#cdb">れきちず</a>(いずれもCC BY 4.0)',
     deployInfoUnavailable: 'デプロイ日時: 取得できません(サーバ経由で開いてください)',
     deployInfoLine: '🚀 デプロイ日時: {time}',
     deployInfoCommitSuffix: ', コミット: {time}',
@@ -197,6 +198,7 @@ const I18N = {
     mapPartialFailToast: '⚠️ Some map data failed to load (retrying in the background)',
     meijiCreditBase: 'Meiji-era land use: source <a href="https://habs.rad.naro.go.jp/" target="_blank" style="color:#cdb">NARO Institute for Agro-Environmental Sciences</a> (Rapid Survey Maps, CC BY 4.0)',
     meijiCreditEdoNote: '<br>*No surveyed maps exist from the Edo era, so Meiji-era data is used as an approximation',
+    edoRealDataCredit: '<br>Edo-era roads/machiya areas: source <a href="https://codh.rois.ac.jp/historical-gis/" target="_blank" style="color:#cdb">ROIS-DS Center for Open Data in the Humanities</a> "Edo Road Dataset" / "Edo Kiriezu Machiya Area Dataset" + <a href="https://rekichizu.jp/" target="_blank" style="color:#cdb">Rekichizu</a> (all CC BY 4.0)',
     deployInfoUnavailable: 'Deploy time: unavailable (please open via the server)',
     deployInfoLine: '🚀 Deploy time: {time}',
     deployInfoCommitSuffix: ', commit: {time}',
@@ -353,7 +355,7 @@ function refreshMeijiCredit() {
   const cr = document.getElementById('credit');
   if (!cr) return;
   cr.style.display = 'block';
-  cr.innerHTML = t('meijiCreditBase') + (MODE === 'edo' ? t('meijiCreditEdoNote') : '');
+  cr.innerHTML = t('meijiCreditBase') + (MODE === 'edo' ? t('meijiCreditEdoNote') : '') + t('edoRealDataCredit');
 }
 refreshMeijiCredit();
 

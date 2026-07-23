@@ -566,6 +566,88 @@ async function loadMeijiLanduse() {
   showToast(`🌾 ${t('meijiLoadedToast', { label, count: meijiCells.size })}`);
 }
 
+// ======= 江戸期実データ(街道・町家領域) =======
+// 【2026-07-25追加】ROIS-DS人文学オープンデータ共同利用センター(CODH)+株式会社MIERUNE
+// 「れきちず」が公開する実測ベースの江戸期データセット(いずれもCC BY 4.0)を、事前に
+// Shapefile→JSON変換して同梱したもの(data/edo-roads.json, data/edo-machiya.json。
+// 出典: 「江戸主要街道データセット」「『江戸切絵図』町家領域データセット」)。
+// 【重要】これらは全国どこでもカバーしているわけではない。街道データは五街道+主要脇街道
+// (計37本)のみで、伊勢原周辺の大山道(矢倉沢往還)は含まれない。町家領域データは
+// 江戸の御府内(切絵図29枚分。日本橋・神田・芝・麻布・四谷・小石川・深川など中心部)の
+// みが対象で、伊勢原はカバーされない。よって伊勢原の生成は従来どおり迅速測図100m
+// グリッド+現代密度ヒューリスティックのままで変化せず、実データのある東京中心部・
+// 主要街道沿いだけ精度が上がる(=地域ごとに当時の実際の姿へ近づける、という方針どおり)。
+const edoMachiyaGrid = new Map(); // polyGridAdd/queryPolyGrid用の空間ハッシュ(町家領域ポリゴン)
+const EDO_ROAD_SEG_CELL = 100;
+const edoRoadSegGrid = new Map(); // 街道の線分の空間ハッシュ(近接判定専用。可視メッシュ化はしない)
+let edoRealDataReady = false;
+function edoRoadSegAdd(seg) {
+  const gx0 = Math.floor(Math.min(seg.x1, seg.x2) / EDO_ROAD_SEG_CELL), gx1 = Math.floor(Math.max(seg.x1, seg.x2) / EDO_ROAD_SEG_CELL);
+  const gz0 = Math.floor(Math.min(seg.z1, seg.z2) / EDO_ROAD_SEG_CELL), gz1 = Math.floor(Math.max(seg.z1, seg.z2) / EDO_ROAD_SEG_CELL);
+  for (let gx = gx0; gx <= gx1; gx++) for (let gz = gz0; gz <= gz1; gz++) {
+    const k = gx + ',' + gz;
+    let arr = edoRoadSegGrid.get(k);
+    if (!arr) { arr = []; edoRoadSegGrid.set(k, arr); }
+    arr.push(seg);
+  }
+}
+// 座標(x,z)から距離maxD以内に実測の江戸期街道が通っているか(宿場町らしさの補強シグナル用)
+function nearEdoHistoricalRoad(x, z, maxD) {
+  const cellR = Math.max(1, Math.ceil(maxD / EDO_ROAD_SEG_CELL)) + 1;
+  const gx = Math.floor(x / EDO_ROAD_SEG_CELL), gz = Math.floor(z / EDO_ROAD_SEG_CELL);
+  const d2 = maxD * maxD;
+  for (let dx = -cellR; dx <= cellR; dx++) for (let dz = -cellR; dz <= cellR; dz++) {
+    const arr = edoRoadSegGrid.get((gx + dx) + ',' + (gz + dz));
+    if (!arr) continue;
+    for (const s of arr) {
+      if (distSqPointToSeg(x, z, s.x1, s.z1, s.x2, s.z2) < d2) return true;
+    }
+  }
+  return false;
+}
+// 座標(x,z)が「江戸切絵図」実測町家領域(=実際に町人が密集して住んでいた場所)の内側か
+function isInEdoMachiyaArea(x, z) {
+  for (const p of queryPolyGrid(edoMachiyaGrid, x, x, z, z)) {
+    if (x < p.minX || x > p.maxX || z < p.minZ || z > p.maxZ) continue;
+    if (pointInPolygon(x, z, p.pts)) return true;
+  }
+  return false;
+}
+async function loadEdoRealData() {
+  try {
+    const [roadRes, machiyaRes] = await Promise.all([
+      fetch('/data/edo-roads.json'),
+      fetch('/data/edo-machiya.json'),
+    ]);
+    const roadData = await roadRes.json();
+    const machiyaData = await machiyaRes.json();
+    for (const road of roadData.roads) {
+      for (const line of road.lines) {
+        for (let i = 0; i + 1 < line.length; i++) {
+          const a = latLonToXZ(line[i][1], line[i][0]);
+          const b = latLonToXZ(line[i + 1][1], line[i + 1][0]);
+          edoRoadSegAdd({ x1: a.x, z1: a.z, x2: b.x, z2: b.z });
+        }
+      }
+    }
+    for (const sheet of machiyaData.sheets) {
+      for (const ring of sheet.rings) {
+        const pts = ring.map(([lon, lat]) => latLonToXZ(lat, lon));
+        let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+        for (const p of pts) {
+          if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
+          if (p.z < minZ) minZ = p.z; if (p.z > maxZ) maxZ = p.z;
+        }
+        polyGridAdd(edoMachiyaGrid, { pts, minX, maxX, minZ, maxZ });
+      }
+    }
+    edoRealDataReady = true;
+    console.log(`[edo-real-data] loaded: ${roadData.roads.length} roads, ${machiyaData.sheets.length} machiya sheets`);
+  } catch (e) {
+    console.warn('[edo-real-data] load failed (falling back to modern-density heuristic only)', e);
+  }
+}
+
 // 【2026-07-17】thinPts/stitchRings(+_llEq)はjs/lib/pure.jsへ移動(CODE_REVIEW_20260717 P13-1)。
 
 // ======= multipolygon 水面(相模川クラスの大河川) =======

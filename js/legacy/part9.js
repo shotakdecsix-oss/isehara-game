@@ -780,6 +780,9 @@ setInterval(saveLastPos, 10000);
   // 丸ごと無駄になる(標高APIの往復時間ぶん「マップを読み込み中」が無駄に延びていた)。
   if (!resumeFarJump) await loadNearTerrain(0, 0);
   if (USES_MEIJI_LANDUSE) await loadMeijiLanduse();
+  // 【2026-07-25】江戸期実データ(街道・町家領域)は生成をブロックしない補強シグナルなので
+  // awaitせず裏で読み込む(未読込中はedoRealDataReady=falseで従来ロジックにフォールバックする)。
+  if (USES_MEIJI_LANDUSE) loadEdoRealData();
   // モード切替/遠方ジャンプの再開時は、loadOSM()内部で再開先へ原点を付け替え(recenterOrigin)、
   // regionBaseReadyがfalseに戻るため、下のloadNearTerrainで新しい地域の高度基準が確定し直される。
   await loadOSM();
