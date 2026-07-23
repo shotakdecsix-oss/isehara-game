@@ -647,11 +647,17 @@ async function fetchOSMTileBatch() {
   // 再試行させ、リクエスト数の急増を防ぐ。
   const nextTile = osmTileQueue[0];
   const nextFailCount = nextTile ? (osmTileFailCount.get(nextTile.tx + ',' + nextTile.tz) || 0) : 0;
-  // 【2026-07-16】プレイヤー近傍(3×3圏)のタイルは常に1枚クエリ。実測で1枚=1〜1.5秒、
+  // 【2026-07-16】プレイヤー近傍のタイルは常に1枚クエリ。実測で1枚=1〜1.5秒、
   // 3枚まとめ=10〜30秒(密集地)なので、体感を決める近傍タイルだけ小さく速く取る。
   // 1枚クエリはIndexedDBキャッシュの対象にもなる(キャッシュはタイル単位のため)。
   // 外周のタイルは従来どおり3枚まとめでリクエスト数を抑える。
-  const nearSolo = nextTile && Math.max(Math.abs(nextTile.tx + 0.5 - ptx), Math.abs(nextTile.tz + 0.5 - ptz)) <= 1.6;
+  // 【2026-07-25修正】当初は3×3圏(距離1.6)だけを対象にしていたが、その後スコアリング側の
+  // 近傍優先(_tileScore内のNEAR_TIER_R=5×5・距離2)を先に拡張した際、こちらの1枚クエリ範囲を
+  // 揃え忘れていた。結果、5×5の外周(距離2)は「優先度は最優先なのに実際のクエリは重い
+  // 3枚まとめ」という不整合を抱え、そこが失敗・再試行を繰り返して3並列の枠を占有し続け、
+  // 近傍のはずのタイルがいつまでも赤(fetching)のまま進まない実機報告につながった。
+  // NEAR_TIER_Rに揃え、近傍5×5は丸ごと軽量な1枚クエリにする。
+  const nearSolo = nextTile && Math.max(Math.abs(nextTile.tx - _pTileX), Math.abs(nextTile.tz - _pTileZ)) <= NEAR_TIER_R;
   let batchSize = (!roadReadyTiles.has(ptKey) || nextFailCount >= 2 || nearSolo) ? 1 : OSM_TILE_BATCH;
   // 【2026-07-17・Fable5診断】上のソートでbackoff中のタイルは後ろへ回しているが、
   // 先頭からbatchSize件がたまたまbackoff中のタイルを含んでしまう(=eligibleが
