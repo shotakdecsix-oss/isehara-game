@@ -34,7 +34,16 @@ const MAX_ATTEMPTS = 3;
 // 平常時は従来どおり寛容な45秒(密集地の正常な低速応答を誤って打ち切らない)を維持し、
 // 詰まっている時だけ短縮する。
 const CONGESTION_BACKLOG = 6;      // このホスト宛ての待ち件数がこれを超えたら「詰まり」とみなす
-const CONGESTED_TIMEOUT_MS = 20000; // 詰まり中の1リクエストあたりの持ち時間(平常時45秒→20秒)
+// 【2026-07-25(2)・ユーザー相談】当初は一律20秒にしていたが、3タイルまとめクエリは正常時
+// でも10〜30秒かかる実測があり、一律20秒だと詰まり中はまとめクエリのほとんどが正常応答でも
+// 間に合わず失敗→即リトライになり、Overpassへのリクエスト数がかえって増えて詰まりを悪化
+// させかねない(429ストームの自己増幅と同じ構図)。1タイル単体クエリ(正常時1〜2秒)と
+// 3タイルまとめ(正常時10〜30秒)とでは許容できる打ち切りの短さが全く違うため、
+// クエリが自己申告しているOverpass側timeout([timeout:N]、1タイル=20/26秒・3タイルまとめ=
+// 30/38秒。buildOSMBatchQuery(part8.js)参照)を見て使い分ける。
+const CONGESTED_TIMEOUT_MS_SOLO = 5000;   // 詰まり中・1タイル単体クエリの持ち時間
+const CONGESTED_TIMEOUT_MS_BATCH = 20000; // 詰まり中・複数タイルまとめクエリの持ち時間(従来値のまま)
+const SOLO_QUERY_TIMEOUT_SEC_MAX = 28; // これ以下ならクエリ自己申告timeoutから「1タイル単体」とみなす
 
 // ---------- デプロイ日時 ----------
 // Renderはデプロイのたびにこのプロセスを新しく起動し直すため、プロセス起動時刻が
@@ -365,8 +374,13 @@ async function fetchUpstream(upstreamUrl, opts) {
         // 【2026-07-25】このタスクの実際の実行タイミング(レーンの順番が回ってきた瞬間)で
         // 詰まり具合を判定する。呼び出し時点ではなくここで見ることで、キューで待っている
         // 間に詰まりが解消していれば通常の45秒のまま、まだ詰まっていれば短縮版を使う。
+        // 【2026-07-25(2)】短縮の度合いはisSoloTile(1タイル単体かどうか)で使い分ける。
+        // 1タイル単体は正常時1〜2秒で返るので5秒まで攻めても実害が少ないが、3タイル
+        // まとめは正常時でも10〜30秒かかるため、20秒(従来値)より短くすると正常応答まで
+        // 打ち切ってリトライを増やし、かえって詰まりを悪化させる。
         const congested = (pendingByHost.get(host) || 0) > CONGESTION_BACKLOG;
-        const timeoutMs = congested ? CONGESTED_TIMEOUT_MS : UPSTREAM_TIMEOUT_MS;
+        const timeoutMs = !congested ? UPSTREAM_TIMEOUT_MS
+          : (opts.isSoloTile ? CONGESTED_TIMEOUT_MS_SOLO : CONGESTED_TIMEOUT_MS_BATCH);
         return httpsRequestOnce(upstreamUrl, Object.assign({}, opts, { timeoutMs }));
       });
       if (res.status === 200) return res;
@@ -454,11 +468,21 @@ async function handleApi(req, res, apiKey) {
   const cacheKeySource = reqBody ? (upstreamUrl + '|POST|' + reqBody) : upstreamUrl;
   const file = cachePath(api.dir, cacheKeySource);
   const isAbandoned = () => (inflightWaiters.get(cacheKeySource) || 0) <= 0;
+  // 【2026-07-25(2)】クエリ本文が自己申告しているOverpass側timeout([timeout:N])を見て、
+  // 1タイル単体クエリか複数タイルまとめクエリかを判定する(詰まり時のタイムアウト長さの
+  // 使い分けに使う。詳細はCONGESTED_TIMEOUT_MS_SOLO/BATCH宣言部のコメント参照)。
+  let isSoloTile = false;
+  if (reqBody) {
+    try {
+      const m = decodeURIComponent(reqBody).match(/\[timeout:(\d+)\]/);
+      if (m) isSoloTile = parseInt(m[1], 10) <= SOLO_QUERY_TIMEOUT_SEC_MAX;
+    } catch (e) { /* デコード失敗時はbatch扱いのまま(安全側) */ }
+  }
   const upstreamOpts = Object.assign(
     reqBody
       ? { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: reqBody }
       : {},
-    { isAbandoned }
+    { isAbandoned, isSoloTile }
   );
 
   // 1) キャッシュヒット → 即応答
