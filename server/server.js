@@ -314,12 +314,18 @@ const BACKLOG_PER_EXTRA_LANE = 4; // このペースでバックログ(待ち件
 const pendingByHost = new Map();   // host -> 現在scheduleUpstreamで処理待ち/処理中の件数(詰まり検出用)
 const laneChains = new Map();      // host -> [Promise, ...](レーンごとの直列チェーン。必要に応じて伸びる)
 const laneLastStartAt = new Map(); // host -> [ts, ...](レーンごとの最終開始時刻。ペース配分用)
+// 【2026-07-27・IMPL_PROMPT_20260726 修正3】レーンごとの「未完了件数」(depth: 割り当て時+1、
+// 完了[成功/失敗どちらでも]時-1)。starts(最終開始時刻)だけでは「まだ実行中だが開始が古い
+// レーン」と「最近使い終わってすぐ空いたレーン」を区別できず、前者を「一番長く空いている」
+// と誤認して選んでしまうバグがあった(下のscheduleUpstream参照)。depthはその区別を可能にする。
+const laneDepth = new Map(); // host -> [depth, ...]
 function ensureLanes(host, n) {
-  let lanes = laneChains.get(host), starts = laneLastStartAt.get(host);
+  let lanes = laneChains.get(host), starts = laneLastStartAt.get(host), depths = laneDepth.get(host);
   if (!lanes) { lanes = []; laneChains.set(host, lanes); }
   if (!starts) { starts = []; laneLastStartAt.set(host, starts); }
-  while (lanes.length < n) { lanes.push(Promise.resolve()); starts.push(0); } // 新設分は「即使える」扱い
-  return { lanes, starts };
+  if (!depths) { depths = []; laneDepth.set(host, depths); }
+  while (lanes.length < n) { lanes.push(Promise.resolve()); starts.push(0); depths.push(0); } // 新設分は「即使える」扱い
+  return { lanes, starts, depths };
 }
 // 【2026-07-26・IMPL_PROMPT_20260724 Phase3】弾力レーン(2〜4本)のうち0番を「現在地
 // ブロッキング/近傍単体クエリ」優先の予約レーンにする。クライアント(part8.js)が
@@ -338,12 +344,23 @@ function scheduleUpstream(host, task, priority) {
   pendingByHost.set(host, pending);
   // バックログが積んでいるほどレーンを増やす(詰まり検出→強制的に並列度を上げて進める)
   const n = Math.min(MAX_LANES, BASE_LANES + Math.floor(Math.max(0, pending - BASE_LANES) / BACKLOG_PER_EXTRA_LANE));
-  const { lanes, starts } = ensureLanes(host, n);
+  const { lanes, starts, depths } = ensureLanes(host, n);
   const useReserved = priority === 'blocking' || priority === 'near';
   const startIdx = useReserved ? 0 : 1; // far優先度は0番(予約)を候補から外す
-  // 現在有効なn本(の候補範囲)の中で一番長く空いている(=最終開始時刻が一番過去の)レーンに割り当てる
+  // 【2026-07-27・IMPL_PROMPT_20260726 修正3(症状Bの有力因)】以前は「最終開始時刻が最古」
+  // だけでレーンを選んでいたが、これは「まだ実行中だが開始が古いレーン」と「最近使い終わって
+  // すぐ空いたレーン」を区別できない。45秒級のfarクエリを実行中のレーンは開始時刻が
+  // 過去のまま更新されないため、「一番長く空いている」と誤認され続け、その裏でblocking/near
+  // が次々とこの実行中レーンの後ろにチェーンされてしまっていた(予約レーン0がすぐ後に
+  // 空いていても、開始時刻の新しさだけで「使用中」と判定されて避けられてしまうケースがあった)。
+  // 未完了件数(depth)が最小のレーンを最優先で選び、同数の場合だけ従来通り開始時刻最古を
+  // タイブレークに使う。depthが0のレーンは(チェーンの前段が確定済みなので)ほぼ即座に
+  // 開始できる、という保証が得られる。
   let laneIdx = startIdx;
-  for (let i = startIdx + 1; i < n; i++) if (starts[i] < starts[laneIdx]) laneIdx = i;
+  for (let i = startIdx + 1; i < n; i++) {
+    if (depths[i] < depths[laneIdx] || (depths[i] === depths[laneIdx] && starts[i] < starts[laneIdx])) laneIdx = i;
+  }
+  depths[laneIdx]++;
   const prev = lanes[laneIdx];
   const p = prev.then(async () => {
     const wait = starts[laneIdx] + MIN_INTERVAL_MS - Date.now();
@@ -358,6 +375,8 @@ function scheduleUpstream(host, task, priority) {
   // 再発していたのは、httpsGetOnce側に必ず確定させる保証が無かったことが一因と推測される
   // (下記httpsGetOnceのハードタイムアウト参照)。
   lanes[laneIdx] = p.then(() => {}, () => {}); // 失敗してもレーンは継続
+  const releaseDepth = () => { depths[laneIdx] = Math.max(0, depths[laneIdx] - 1); };
+  p.then(releaseDepth, releaseDepth);
   const releasePending = () => {
     const c = (pendingByHost.get(host) || 1) - 1;
     if (c <= 0) pendingByHost.delete(host); else pendingByHost.set(host, c);
