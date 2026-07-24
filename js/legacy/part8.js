@@ -701,15 +701,19 @@ async function fetchOSMTileBatch() {
     const waitedMs = Date.now() - (osmTileQueuedAt.get(tileStateKey(t.tx, t.tz, t.kind)) || Date.now());
     const agingTiebreak = Math.min(100, waitedMs / 600); // 60秒で頭打ち、最大100(階層間ギャップ10000より十分小さい)
     if (_blockingTiles.has(_posKey(t))) return base - agingTiebreak - 100000; // 建物生成を直接ブロックしている分は最優先
-    // 【2026-07-27・IMPL_PROMPT_20260726 修正5(症状Aの補助因)】建物後追いジョブ
-    // (kind='building')は、投入された時点で既に道路確定済みだった元近傍タイル(=有限集合、
-    // 無制限には増えない)。以前は下のNEAR_TIER_R距離判定の中でしか近傍tierオフセットを
-    // 付けていなかったため、プレイヤーが移動してそのタイルが現在の近傍圏外に出ると
-    // オフセット0(外周tier)に落ち、階層ギャップ10000・agingTiebreak上限100では絶対に
-    // 追いつけないまま恒久的に後回しにされていた(道路は確定済みで建物だけ埋まらない
-    // 「緑緑赤」の一因)。距離に関係なく常に近傍tierオフセットで扱う(blocking(-100000)
-    // より上には行かないため現在地優先は崩れない)。
-    if (t.kind === 'building') return base - agingTiebreak - 10000 - 50;
+    // 【2026-07-27・IMPL_PROMPT_20260726 修正5】建物後追いジョブ(kind='building')は、
+    // 投入された時点で既に道路確定済みだった元近傍タイル(=有限集合、無制限には増えない)。
+    // 以前は下のNEAR_TIER_R距離判定の中でしか近傍tierオフセットを付けていなかったため、
+    // プレイヤーが移動してそのタイルが現在の近傍圏外に出るとオフセット0(外周tier)に落ち、
+    // 恒久的に後回しにされていた(「緑緑赤」の一因)。距離に関係なく常に近傍tier「帯」の
+    // オフセットで扱う(blocking(-100000)より上には行かないため現在地優先は崩れない)。
+    // 【2026-07-27・ユーザー判断】ただし同じ近傍帯の中では「まだ道路すら取れていない
+    // 新しいタイル」を「既に道路が終わって建物だけ残っているタイル」より先に処理する方針に
+    // 変更(Step Aで建物ジョブが消えて二度と来なくなるバグは修正済みのため、建物を
+    // 多少後回しにしても迷子になるリスクは無い)。-50(僅かなペナルティ)を+50(僅かに
+    // 手前へ)から符号反転させることで、同じ近傍帯内での道路>建物の順序にする
+    // (帯自体は変わらないので、外周tierに落ちて飢餓するという元のバグは再発しない)。
+    if (t.kind === 'building') return base - agingTiebreak - 10000 + 50;
     if (Math.abs(t.tx - _pTileX) <= NEAR_TIER_R && Math.abs(t.tz - _pTileZ) <= NEAR_TIER_R) return base - agingTiebreak - 10000; // 近傍3x3は外側より先
     return base - agingTiebreak;
   };
