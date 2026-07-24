@@ -662,6 +662,31 @@ async function fetchOSMTileBatch() {
   const _bz0 = Math.floor((player.position.z - _blockPad) / OSM_TILE_M), _bz1 = Math.floor((player.position.z + _blockPad) / OSM_TILE_M);
   const _blockingTiles = new Set();
   for (let tx = _bx0; tx <= _bx1; tx++) for (let tz = _bz0; tz <= _bz1; tz++) _blockingTiles.add(tx + ',' + tz);
+  // 【2026-07-27・ユーザー提案】tier2(ring1、周囲8枚)のうちプレイヤーに最も近い1枚を
+  // tier1(blocking)へ格上げする。プレイヤーが今のタイルの端・角に近づいている時、次に
+  // 踏み込むタイルの道路・建物を先読みで仕上げておき、「タイルに入った瞬間まだ赤い」体感を
+  // 減らす狙い。_blockingTilesは_tileScore(-100000最優先)とサーバーへの優先度ヒント
+  // (tilePriority='blocking')の両方が参照する集合なので、ここに足すだけで両方に伝播する。
+  // 各候補タイルの矩形上でプレイヤー位置に一番近い点との距離(クランプ)を比較し、
+  // 辺で接する・角で接するどちらの隣接タイルにも正しく対応する。
+  {
+    const _pcx = player.position.x, _pcz = player.position.z;
+    // 【注】下のNEAR_TIER_R判定で定義される_pTileX/_pTileZと同じ計算だが、あちらは
+    // この時点でまだ宣言されていないため、ここで独立に計算する(依存関係を増やさない)。
+    const _selfTileX = Math.floor(_pcx / OSM_TILE_M), _selfTileZ = Math.floor(_pcz / OSM_TILE_M);
+    let _bestKey = null, _bestD2 = Infinity;
+    for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
+      if (dx === 0 && dz === 0) continue; // 中心(既にtier1)は対象外
+      const tx = _selfTileX + dx, tz = _selfTileZ + dz;
+      const k = tx + ',' + tz;
+      if (_blockingTiles.has(k)) continue; // 角で既にtier1扱いのタイルは対象外
+      const x0 = tx * OSM_TILE_M, x1 = x0 + OSM_TILE_M, z0 = tz * OSM_TILE_M, z1 = z0 + OSM_TILE_M;
+      const nx = Math.max(x0, Math.min(_pcx, x1)), nz = Math.max(z0, Math.min(_pcz, z1));
+      const d2 = (_pcx - nx) * (_pcx - nx) + (_pcz - nz) * (_pcz - nz);
+      if (d2 < _bestD2) { _bestD2 = d2; _bestKey = k; }
+    }
+    if (_bestKey) _blockingTiles.add(_bestKey);
+  }
   // 【2026-07-19】ユーザー報告: デバッグオーバーレイで見ると、取得待ち(赤)のタイルが
   // 現在地から離れた場所(先読み5x5・進行方向先読み分)まで一度に広がりすぎていて、
   // 3並列(OSM_TILE_CONCURRENCY)がそちらにも分散してしまっていた。現在地タイル中心の
