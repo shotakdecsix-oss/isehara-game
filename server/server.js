@@ -218,29 +218,42 @@ function cachePath(apiDir, upstreamUrl) {
   return path.join(CACHE_DIR, apiDir, h + '.json');
 }
 
-/* ---------- 上流レート制限 (ホスト別・並列レーン方式) ---------- */
+/* ---------- 上流レート制限 (ホスト別・弾力レーン方式) ---------- */
 // 【2026-07-25・ユーザー報告対応】以前はホスト単位で完全直列(1本のチェーン)だった。
 // これだと、1件のリクエストが上流(Overpass)側で数分〜十数分かかるケース(下のコメント
 // 参照: 実測881秒)に当たると、同じホストへの以降の全リクエスト(他タイル・他プレイヤー
 // 全員分)がその1件の裏で完全に止まる。実機報告(近傍タイルの道路生成が5分以上
 // fetchingのまま停滞し、しばらくすると溜まっていた分がいっぺんに解放される)は、
 // この「1本の直列キューが1件の長時間リクエストに握られる」構造と一致する。
-// Overpass公開インスタンスは1IPあたり2接続まで通る実測があるため(direct()側の
-// コメント参照)、完全直列(1レーン)から2レーンの並列キューに変え、1件が長引いても
-// もう1レーンで別のリクエストを進められるようにする。
-const HOST_LANES = 2;
-const laneChains = new Map();      // host -> [Promise, Promise](レーンごとの直列チェーン)
-const laneLastStartAt = new Map(); // host -> [ts, ts](レーンごとの最終開始時刻。ペース配分用)
+// 【2026-07-25(2)・ユーザー報告】固定2レーン化後も改善はしたが、Overpassが混雑している
+// 時間帯は2レーンとも長時間(1試行あたり最大60秒×リトライ)埋まり、後ろで待つリクエストが
+// 数分単位で足止めされる「詰まり」が引き続き確認された。ユーザー提案どおり、詰まり
+// (=このホスト宛ての処理待ち件数が多い状態)を検出したら一時的にレーン数を増やして
+// 強制的に処理を前へ進める弾力運用にする。平常時はBASE_LANES(2、従来どおりOverpassに
+// 優しい)のまま、バックログが積んだ時だけMAX_LANESまで一時的に広げ、解消すれば
+// 自然と使うレーン数も減る(レーン自体は使い回すため縮小処理は不要)。
+const BASE_LANES = 2;
+const MAX_LANES = 4; // Overpass1IPあたりの実測上限(2)にはやや踏み込むが、詰まり解消を優先
+const BACKLOG_PER_EXTRA_LANE = 4; // このペースでバックログ(待ち件数)が積むごとにレーンを1本追加
+const pendingByHost = new Map();   // host -> 現在scheduleUpstreamで処理待ち/処理中の件数(詰まり検出用)
+const laneChains = new Map();      // host -> [Promise, ...](レーンごとの直列チェーン。必要に応じて伸びる)
+const laneLastStartAt = new Map(); // host -> [ts, ...](レーンごとの最終開始時刻。ペース配分用)
+function ensureLanes(host, n) {
+  let lanes = laneChains.get(host), starts = laneLastStartAt.get(host);
+  if (!lanes) { lanes = []; laneChains.set(host, lanes); }
+  if (!starts) { starts = []; laneLastStartAt.set(host, starts); }
+  while (lanes.length < n) { lanes.push(Promise.resolve()); starts.push(0); } // 新設分は「即使える」扱い
+  return { lanes, starts };
+}
 function scheduleUpstream(host, task) {
-  if (!laneChains.has(host)) {
-    laneChains.set(host, new Array(HOST_LANES).fill(null).map(() => Promise.resolve()));
-    laneLastStartAt.set(host, new Array(HOST_LANES).fill(0));
-  }
-  const lanes = laneChains.get(host);
-  const starts = laneLastStartAt.get(host);
-  // 一番長く空いている(=最終開始時刻が一番過去の)レーンに割り当てる簡易ラウンドロビン
+  const pending = (pendingByHost.get(host) || 0) + 1;
+  pendingByHost.set(host, pending);
+  // バックログが積んでいるほどレーンを増やす(詰まり検出→強制的に並列度を上げて進める)
+  const n = Math.min(MAX_LANES, BASE_LANES + Math.floor(Math.max(0, pending - BASE_LANES) / BACKLOG_PER_EXTRA_LANE));
+  const { lanes, starts } = ensureLanes(host, n);
+  // 現在有効なn本の中で一番長く空いている(=最終開始時刻が一番過去の)レーンに割り当てる
   let laneIdx = 0;
-  for (let i = 1; i < HOST_LANES; i++) if (starts[i] < starts[laneIdx]) laneIdx = i;
+  for (let i = 1; i < n; i++) if (starts[i] < starts[laneIdx]) laneIdx = i;
   const prev = lanes[laneIdx];
   const p = prev.then(async () => {
     const wait = starts[laneIdx] + MIN_INTERVAL_MS - Date.now();
@@ -250,11 +263,16 @@ function scheduleUpstream(host, task) {
   });
   // 【重要・2026-07-15】ここでlanesに繋ぐpがもし永遠に確定(resolve/reject)しなければ、
   // 同じレーンへの以降のリクエストがこのpromiseの後ろに並んだまま永久に開始すらされなく
-  // なる(1件のハングでそのレーンが詰まる。もう1レーンは生きているので全滅はしない)。
+  // なる(1件のハングでそのレーンが詰まる。他のレーンは生きているので全滅はしない)。
   // 「道路・建物の生成が途中で止まる」がサーバー再起動(=デプロイのたび)まで直らず
   // 再発していたのは、httpsGetOnce側に必ず確定させる保証が無かったことが一因と推測される
   // (下記httpsGetOnceのハードタイムアウト参照)。
   lanes[laneIdx] = p.then(() => {}, () => {}); // 失敗してもレーンは継続
+  const releasePending = () => {
+    const c = (pendingByHost.get(host) || 1) - 1;
+    if (c <= 0) pendingByHost.delete(host); else pendingByHost.set(host, c);
+  };
+  p.then(releasePending, releasePending);
   return p;
 }
 
