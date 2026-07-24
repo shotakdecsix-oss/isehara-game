@@ -219,7 +219,24 @@ const INJECT = `<script>
           if (res.status >= 500) { proxyDown[prefix] = Date.now(); return direct(); }
           proxyDown[prefix] = null; // プロキシ復帰確認
           return res;
-        }, () => { proxyDown[prefix] = Date.now(); return direct(); });
+        }, (e) => {
+          // 【2026-07-27・直接モード誤発動の修正】ここは「プロキシへのfetch自体が失敗/拒否された」
+          // 場合の分岐だが、init.signal(part8.js側のAbortController、近傍分離ジョブで28〜46秒・
+          // 現在地タイルで70秒)がタイムアウトで中断した場合もPromiseはここで(AbortErrorとして)
+          // reject される。これは「プロキシが壊れている」のではなく「クライアントが自分の
+          // 我慢時間を使い切っただけ」で、サーバー側は45秒×最大3回・詰まり時はレーンが
+          // 空くまでの待ち時間も加わり、正常運用でも70秒を超えて処理が続いていることがある
+          // (server.js自身のUPSTREAM_TIMEOUT_MS/MAX_ATTEMPTSコメント、および過去に実測881秒で
+          // 最終的に200が返ったケース参照)。これを「プロキシダウン」と誤認してdirect()に
+          // 倒すと、密集地の通常の詰まりのたびにプレイヤーが2分間、各プレイヤー個別のIPで
+          // Overpassの実接続上限(1IPあたり2本)へ直接勝負することになり、429ストームを
+          // 自ら誘発していた(2026-07-27実機ログで確認: direct()経由の429連発とfetchingTiles
+          // 滞留の同時発生)。AbortErrorの場合はproxyDownを立てず、呼び出し元(fetchOSMTileBatch
+          // の既存リトライ・バックオフ)にそのまま失敗として返す。
+          if (e && e.name === 'AbortError') throw e;
+          proxyDown[prefix] = Date.now();
+          return direct();
+        });
       }
     }
     return origFetch(input, init);
