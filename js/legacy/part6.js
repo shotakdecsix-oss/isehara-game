@@ -35,8 +35,17 @@ const WIDE_D = 2 * WIDE_HALF_LAT * SCALE;
 // これで富士山など伊勢原から離れた場所でも実際の地形・標高が出る。
 let wideCX = 0, wideCZ = 0, wideLoading = false;
 
-const NEAR_HALF_LAT = 0.036, NEAR_HALF_LON = 0.036; // NEAR: ≈ ±4km(高解像度・プレイヤー追従)
-const NEAR_SEGS = 20, NEAR_SEGS1 = NEAR_SEGS + 1;   // NEAR: 約300〜400m間隔、約5バッチ
+// 【2026-07-25・地形tier1-3常時green化】以前の0.036だと、経度方向はCOS_LAT(伊勢原=約0.81)で
+// 縮むため実際の半幅はNEAR_W/2≈3250m・NEAR_D/2≈3996mしか無かった。一方OSMタイル(part8.js
+// OSM_TILE_M=1600)のtier3(NEAR_TIER_R=2、5x5)はプレイヤーがタイル内のどこにいるかによって
+// 最大(2+1)*1600=4800m先まで届くケースがあり、特に経度方向はtier2(最大3200m)の時点で
+// 既に半幅3250mとの余裕が40m(判定側マージン10m込み)しか無く、tier2ですら頻繁に「地形waitTerrain
+// (青)」に落ちていた(ユーザー報告)。0.06に引き上げ、NEAR_SEGS(=API呼び出しバッチ数)は
+// 変えずに面積だけ広げることで、tier3の最大到達距離+余裕(約5400m)を経度方向でも確保しつつ
+// opentopodataの呼び出し回数(約5バッチ)は増やさない(過去の1日1000コール上限枯渇の再発を避ける)。
+// トレードオフは格子間隔が約325〜400m→約540〜665mに粗くなること(体感の滑らかさは僅かに低下)。
+const NEAR_HALF_LAT = 0.06, NEAR_HALF_LON = 0.06; // NEAR: 経度方向でtier3(最大4800m)+余裕を確保
+const NEAR_SEGS = 20, NEAR_SEGS1 = NEAR_SEGS + 1;   // NEAR: 約540〜665m間隔、約5バッチ(呼び出し回数は据え置き)
 const NEAR_W = 2 * NEAR_HALF_LON * SCALE * COS_LAT;
 const NEAR_D = 2 * NEAR_HALF_LAT * SCALE;
 let nearElev = null, nearCX = 0, nearCZ = 0, nearLoading = false;

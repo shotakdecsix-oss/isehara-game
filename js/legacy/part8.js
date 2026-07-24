@@ -59,6 +59,29 @@ const osmTileQueue = [];
 // 2に戻す。
 const OSM_TILE_CONCURRENCY = 3;
 let osmTileActiveCount = 0;
+// 【2026-07-27・実機報告「tier1/2の建物生成、全体的に時間がかかりすぎ」対応】優先度スコア
+// (_tileScore)は「次に始める仕事」の順番しか制御できず、既にOSM_TILE_CONCURRENCY(3)の
+// 全枠が長時間(遠方まとめクエリは正常時でも10〜30秒)実行中のリクエストで埋まっていると、
+// どれだけ優先度の高い近傍/足元ジョブが後から来ても「空きが出るまで」丸ごと待たされる
+// (スコアリングは既に発行済み・実行中のリクエストを追い越せない)。サーバー側の予約レーン
+// (Phase3)と同じ考え方をクライアント側の並列枠にも導入し、遠方(まとめクエリ)には
+// 全枠を渡さず、常に最低1枠は近傍/足元ジョブの到着に備えて空けておく(processOSMTileQueue
+// 参照)。
+const OSM_TILE_CONCURRENCY_FAR_MAX = Math.max(1, OSM_TILE_CONCURRENCY - 1);
+let osmTileActiveFarCount = 0; // 現在実行中のうち「far」判定(まとめクエリ)で消費している枠数
+// 近傍優先(_tileScore内のNEAR_TIER_R=5×5・距離2)。processOSMTileQueueの予約枠判定でも
+// 使うため、以前はfetchOSMTileBatch内のローカルconstだったものをモジュールスコープへ上げる
+// (値・意味は変えていない)。
+const NEAR_TIER_R = 2; // Chebyshev距離2以内 = 5x5 = 25枚
+// キュー項目tが最終的にsolo(単体)クエリ=近傍/足元候補になるかを判定する軽量ヘルパー。
+// fetchOSMTileBatch内のnearSolo/isSplitJob判定と同じ考え方(kind='road'/'building'は
+// 常にsolo、combinedはNEAR_TIER_R圏内ならsolo)。processOSMTileQueueが実際のソート前に
+// 「予約枠を侵していないか」を概算するために使う。
+function _isNearOrBlockingCandidate(t) {
+  if (t.kind === 'road' || t.kind === 'building') return true;
+  const ptx = Math.floor(player.position.x / OSM_TILE_M), ptz = Math.floor(player.position.z / OSM_TILE_M);
+  return Math.max(Math.abs(t.tx - ptx), Math.abs(t.tz - ptz)) <= NEAR_TIER_R;
+}
 // 【2026-07-25・ユーザー報告】近傍タイルが5分以上fetchingのまま進まない不具合の診断用。
 // これまでのwaitMs(=キュー投入からの経過)だけでは「まだ順番待ちなだけ」と「実際に
 // fetchが開始されたのに終わらない(タイムアウトが機能していない/サーバー側ハング)」を
@@ -454,8 +477,20 @@ function processOSMTileQueue() {
     // 再試行可能なタイルが1件も無ければ、次の機会(checkOSMTilesの周期呼び出し=
     // 最大0.5秒後)まで待つ。
     const now = Date.now();
-    const hasEligible = osmTileQueue.some(t => (osmTileNextRetryAt.get(tileStateKey(t.tx, t.tz, t.kind)) || 0) <= now);
+    let hasEligible = false, hasNearEligible = false;
+    for (const t of osmTileQueue) {
+      if ((osmTileNextRetryAt.get(tileStateKey(t.tx, t.tz, t.kind)) || 0) > now) continue;
+      hasEligible = true;
+      if (_isNearOrBlockingCandidate(t)) { hasNearEligible = true; break; } // 見つかり次第打ち切ってよい(存在確認だけなので)
+    }
     if (!hasEligible) break;
+    // 【2026-07-27・実機報告対応】予約枠チェック。近傍/足元候補が(たまたま今backoff中等で)
+    // 1件もeligibleに無く、かつfarが既に予約上限まで使っているなら、この空き枠はfarに
+    // 渡さず温存する(=何も起動せずbreak)。次の機会(他の枠の解放時・checkOSMTilesの
+    // 周期呼び出し)に状況が変わっていれば再評価される。ここでの判定は必ずosmTileActiveCount
+    // 増加・fetchOSMTileBatch呼び出しより前に行う(上のbackoffチェックと同じ理由で、
+    // 「即座に判定→枠解放→whileがまた回る」同一フレーム内の無限ループを避けるため)。
+    if (!hasNearEligible && osmTileActiveFarCount >= OSM_TILE_CONCURRENCY_FAR_MAX) break;
     osmTileActiveCount++;
     fetchOSMTileBatch();
   }
@@ -696,7 +731,8 @@ async function fetchOSMTileBatch() {
   // 【2026-07-21・ユーザー報告】3x3(距離1)だと、テーブル上は現在地のすぐ隣に見えるタイルが
   // 近傍優先の枠外(遠方タイルと同列)になり、Overpass混雑時に数分単位で放置される事例を確認
   // (例: 22,-21が219秒待ち)。5x5(距離2)へ拡大し、体感上「近い」と感じる範囲をカバーする。
-  const NEAR_TIER_R = 2; // Chebyshev距離2以内 = 5x5 = 25枚
+  // 【2026-07-27】NEAR_TIER_Rはモジュールスコープへ移動済み(processOSMTileQueueの予約枠
+  // 判定でも使うため)。値・意味はここでは変えていない。
   const _pTileX = Math.floor(player.position.x / OSM_TILE_M), _pTileZ = Math.floor(player.position.z / OSM_TILE_M);
   // 【2026-07-16】距離のみのソートだと真後ろと真正面のタイルが同順位になり、移動中に
   // 前方タイルが後回しになることがあった。進行方向(checkOSMTilesで更新される
@@ -849,6 +885,11 @@ async function fetchOSMTileBatch() {
   // far=それ以外(複数タイルまとめクエリ)。サーバー側は0番レーンをblocking/near専用に
   // 予約しており、far指定はそのレーンを使わない=重いまとめクエリが予約レーンを塞がない。
   const tilePriority = keys.some(k => _blockingTiles.has(k)) ? 'blocking' : (batch.length === 1 ? 'near' : 'far');
+  // 【2026-07-27・実機報告対応】このバッチが実際に'far'枠を1つ消費したことを記録する
+  // (processOSMTileQueueの予約枠チェック用)。ここは最初のawaitより前(同期区間)なので、
+  // 呼び出し元のwhileループが次にosmTileActiveFarCountを参照する時には必ず反映済み。
+  // finally節で必ず対になる--を行う(成功・失敗どちらでも、このワーカーが終わるたびに)。
+  if (tilePriority === 'far') osmTileActiveFarCount++;
   let failed = false;
   // 【重要】以前は Promise.race([fetch(...), timeoutPromise]) で「50秒で見切る」だけだった。
   // これはtimeoutPromise側が先に解決してcatchに落ちるだけで、負けた方のfetch自体は
@@ -1145,6 +1186,7 @@ async function fetchOSMTileBatch() {
     clearTimeout(timeoutId); // 成功時に残ったタイマー自体の掃除(abort()は既に完了済みのfetchには無害)
     _activeFetchStarts.delete(_fetchStartKey); // 診断計器の後片付け(成功・失敗いずれでも必ず消す)
     _activeFetchAborts.delete(_fetchStartKey);
+    if (tilePriority === 'far') osmTileActiveFarCount--; // 上で++した分を必ず対で戻す
   }
   // 【2026-07-17・Fable5診断】以前は失敗時、待ち時間(最大30秒)をこのワーカーが
   // concurrency枠(OSM_TILE_CONCURRENCY=3)を握ったままsleepしていたため、密集地で
