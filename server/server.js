@@ -26,6 +26,15 @@ const CACHE_DIR = path.join(__dirname, 'cache');
 const MIN_INTERVAL_MS = 1100;                     // 上流レート制限 (1req/秒 + 余裕)
 const UPSTREAM_TIMEOUT_MS = 45000;
 const MAX_ATTEMPTS = 3;
+// 【2026-07-25・詰まり検出→強制打ち切り】レーンを弾力化(BASE_LANES→MAX_LANES)しても、
+// 全レーンが同時に「遅いが最終的には応答する」リクエストで埋まってしまえば、レーン数が
+// 増えただけで根本的には同じ「詰まり」が起きる(ユーザー指摘のとおり)。レーン数を
+// 際限なく増やす代わりに、このホスト宛ての待ち件数(詰まりの兆候)が閾値を超えている間は
+// 1回のリクエストの持ち時間そのものを短くし、強制的に見切りをつけてレーンを早く手放す。
+// 平常時は従来どおり寛容な45秒(密集地の正常な低速応答を誤って打ち切らない)を維持し、
+// 詰まっている時だけ短縮する。
+const CONGESTION_BACKLOG = 6;      // このホスト宛ての待ち件数がこれを超えたら「詰まり」とみなす
+const CONGESTED_TIMEOUT_MS = 20000; // 詰まり中の1リクエストあたりの持ち時間(平常時45秒→20秒)
 
 // ---------- デプロイ日時 ----------
 // Renderはデプロイのたびにこのプロセスを新しく起動し直すため、プロセス起動時刻が
@@ -283,6 +292,11 @@ function scheduleUpstream(host, task) {
 // POST(ボディにdata=<クエリ>)はURL長に依存しないため、GET/POST両対応に拡張する。
 function httpsRequestOnce(urlStr, opts) {
   opts = opts || {};
+  // 【2026-07-25・詰まり検出→強制打ち切り対応】通常は45秒(UPSTREAM_TIMEOUT_MS)だが、
+  // 呼び出し側(fetchUpstream)がバックログ検出時に短いopts.timeoutMsを渡してきた場合は
+  // それを使う。1回のリクエストがレーンを握る最長時間を短縮し、詰まっている時ほど
+  // 早く手放させる狙い(詳細はfetchUpstream側コメント参照)。
+  const timeoutMs = opts.timeoutMs || UPSTREAM_TIMEOUT_MS;
   return new Promise((resolve, reject) => {
     let settled = false;
     const settle = (fn, arg) => { if (settled) return; settled = true; clearTimeout(hardTimer); fn(arg); };
@@ -294,8 +308,8 @@ function httpsRequestOnce(urlStr, opts) {
     // 関わらず必ずどこかで確定させる「ハード上限」を別に設ける。
     const hardTimer = setTimeout(() => {
       req.destroy();
-      settle(reject, new Error('upstream hard timeout (' + (UPSTREAM_TIMEOUT_MS + 15000) + 'ms)'));
-    }, UPSTREAM_TIMEOUT_MS + 15000);
+      settle(reject, new Error('upstream hard timeout (' + (timeoutMs + 15000) + 'ms)'));
+    }, timeoutMs + 15000);
     const method = opts.method || 'GET';
     const headers = Object.assign({ 'User-Agent': 'chronodrift-proxy/1.0' }, opts.headers || {});
     if (opts.body) headers['Content-Length'] = Buffer.byteLength(opts.body);
@@ -309,7 +323,7 @@ function httpsRequestOnce(urlStr, opts) {
       }));
       res.on('error', (e) => settle(reject, e)); // 【重要】これが無いのが上記の主因だった
     });
-    req.setTimeout(UPSTREAM_TIMEOUT_MS, () => req.destroy(new Error('upstream timeout')));
+    req.setTimeout(timeoutMs, () => req.destroy(new Error('upstream timeout')));
     req.on('error', (e) => settle(reject, e));
     if (opts.body) req.write(opts.body);
     req.end();
@@ -348,7 +362,12 @@ async function fetchUpstream(upstreamUrl, opts) {
         // キューで待っている間に依頼主が全員いなくなっていたら、上流への実リクエストは
         // 発行せず即座に諦める(直列キューの1枠・レート制限の待ち時間を浪費しない)。
         if (opts.isAbandoned && opts.isAbandoned()) return Promise.reject(new Error('abandoned (no waiters left)'));
-        return httpsRequestOnce(upstreamUrl, opts);
+        // 【2026-07-25】このタスクの実際の実行タイミング(レーンの順番が回ってきた瞬間)で
+        // 詰まり具合を判定する。呼び出し時点ではなくここで見ることで、キューで待っている
+        // 間に詰まりが解消していれば通常の45秒のまま、まだ詰まっていれば短縮版を使う。
+        const congested = (pendingByHost.get(host) || 0) > CONGESTION_BACKLOG;
+        const timeoutMs = congested ? CONGESTED_TIMEOUT_MS : UPSTREAM_TIMEOUT_MS;
+        return httpsRequestOnce(upstreamUrl, Object.assign({}, opts, { timeoutMs }));
       });
       if (res.status === 200) return res;
       lastErr = new Error('upstream HTTP ' + res.status);
