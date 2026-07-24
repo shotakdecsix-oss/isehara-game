@@ -802,6 +802,12 @@ async function fetchOSMTileBatch() {
   // 遠方タイル(3枚まとめ等)側だけで十分。
   const boosted = keys.includes(ptKey) || stateKeys.some(k => osmTileTimeoutBoost.has(k));
   const { query, timeout: osmTimeoutSec } = buildOSMBatchQuery(bboxes, boosted, batchKind);
+  // 【2026-07-26・IMPL_PROMPT_20260724 Phase3】サーバー(server.js)へ優先度ヒントを伝える。
+  // blocking=このバッチに現在地(64m以内)のタイルを含む、near=単体クエリ(近傍分離ジョブ・
+  // 近傍1枚クエリ・ジャンプ直後の1枚クエリ等はすべてbatch.length===1になる)、
+  // far=それ以外(複数タイルまとめクエリ)。サーバー側は0番レーンをblocking/near専用に
+  // 予約しており、far指定はそのレーンを使わない=重いまとめクエリが予約レーンを塞がない。
+  const tilePriority = keys.some(k => _blockingTiles.has(k)) ? 'blocking' : (batch.length === 1 ? 'near' : 'far');
   let failed = false;
   // 【重要】以前は Promise.race([fetch(...), timeoutPromise]) で「50秒で見切る」だけだった。
   // これはtimeoutPromise側が先に解決してcatchに落ちるだけで、負けた方のfetch自体は
@@ -918,10 +924,17 @@ async function fetchOSMTileBatch() {
     // 別経路の同期処理・チャンク到達済みキャッシュ由来の描画だったため影響を受けず、
     // 「川だけ拡張される」ように見えていた)。Overpass API公式にPOST(data=<クエリ>を
     // ボディに)を送る方式が用意されており、URL長に一切依存しないためこちらに統一する。
+    // 【2026-07-26・Phase3】優先度ヒントはカスタムヘッダではなく、POSTボディの追加
+    // フィールド(&priority=...)として送る。カスタムヘッダ(例: X-Tile-Priority)を
+    // 付けると、直接モード(プロキシ不健全時、ブラウザ→overpass-api.deへの本物の
+    // クロスオリジンリクエスト)でCORSプリフライトが発生し、Overpass側がプリフライトに
+    // 応答しなければリクエストごと失敗しかねない。application/x-www-form-urlencoded の
+    // ボディに追加フィールドを足すだけなら「シンプルリクエスト」のままなので、直接モードでも
+    // CORS問題を起こさない(server.js側でこのフィールドを読み取り、上流へは渡す前に取り除く)。
     const res = await fetch('https://overpass-api.de/api/interpreter', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: 'data=' + encodeURIComponent(query),
+      body: 'data=' + encodeURIComponent(query) + '&priority=' + tilePriority,
       signal: abortCtl.signal,
     });
     if (!res.ok) {

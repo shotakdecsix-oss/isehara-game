@@ -263,15 +263,29 @@ function ensureLanes(host, n) {
   while (lanes.length < n) { lanes.push(Promise.resolve()); starts.push(0); } // 新設分は「即使える」扱い
   return { lanes, starts };
 }
-function scheduleUpstream(host, task) {
+// 【2026-07-26・IMPL_PROMPT_20260724 Phase3】弾力レーン(2〜4本)のうち0番を「現在地
+// ブロッキング/近傍単体クエリ」優先の予約レーンにする。クライアント(part8.js)が
+// POSTボディ末尾に付ける優先度ヒント(&priority=blocking|near|far、handleApi参照)を
+// ここで見て、レーンを選ぶ範囲を変える。
+// - blocking/near(=現在地タイル、または近傍分離ジョブ・近傍1枚クエリ)は0番を含む
+//   全レーンから一番空いているものを選べる(0番が別のblocking/nearで埋まっていれば
+//   汎用レーンにあふれてよい。「他のレーンは従来通り全ジョブを扱う」という指示通り)。
+// - far(それ以外、複数タイルまとめクエリ含む)は0番を除いた1番以降からしか選べない。
+//   これにより0番は重いまとめクエリに握られることが構造的に無くなり、外周で重い
+//   クエリが走っている最中でも現在地タイルの取得が数秒以内に開始される。
+// - BASE_LANES=2なのでnは常に2以上。レーン数が2本に縮退していても「0番=予約・
+//   1番=汎用」の構図は保たれる。
+function scheduleUpstream(host, task, priority) {
   const pending = (pendingByHost.get(host) || 0) + 1;
   pendingByHost.set(host, pending);
   // バックログが積んでいるほどレーンを増やす(詰まり検出→強制的に並列度を上げて進める)
   const n = Math.min(MAX_LANES, BASE_LANES + Math.floor(Math.max(0, pending - BASE_LANES) / BACKLOG_PER_EXTRA_LANE));
   const { lanes, starts } = ensureLanes(host, n);
-  // 現在有効なn本の中で一番長く空いている(=最終開始時刻が一番過去の)レーンに割り当てる
-  let laneIdx = 0;
-  for (let i = 1; i < n; i++) if (starts[i] < starts[laneIdx]) laneIdx = i;
+  const useReserved = priority === 'blocking' || priority === 'near';
+  const startIdx = useReserved ? 0 : 1; // far優先度は0番(予約)を候補から外す
+  // 現在有効なn本(の候補範囲)の中で一番長く空いている(=最終開始時刻が一番過去の)レーンに割り当てる
+  let laneIdx = startIdx;
+  for (let i = startIdx + 1; i < n; i++) if (starts[i] < starts[laneIdx]) laneIdx = i;
   const prev = lanes[laneIdx];
   const p = prev.then(async () => {
     const wait = starts[laneIdx] + MIN_INTERVAL_MS - Date.now();
@@ -382,7 +396,7 @@ async function fetchUpstream(upstreamUrl, opts) {
         const timeoutMs = !congested ? UPSTREAM_TIMEOUT_MS
           : (opts.isSoloTile ? CONGESTED_TIMEOUT_MS_SOLO : CONGESTED_TIMEOUT_MS_BATCH);
         return httpsRequestOnce(upstreamUrl, Object.assign({}, opts, { timeoutMs }));
-      });
+      }, opts.priority); // 【Phase3】blocking/near優先度ヒントをレーン選択まで運ぶ
       if (res.status === 200) return res;
       lastErr = new Error('upstream HTTP ' + res.status);
       if (res.status === 429 || res.status >= 500) {
@@ -463,7 +477,18 @@ async function handleApi(req, res, apiKey) {
   // POST(ボディにdata=<クエリ>)へ切り替えた。ここではPOSTならボディを読み取り、
   // それをそのまま上流へもPOSTで転送する。キャッシュキーもURL(restは空になる)ではなく
   // ボディ内容ベースに切り替える必要がある。
-  const reqBody = req.method === 'POST' ? await readRequestBody(req) : '';
+  const rawBody = req.method === 'POST' ? await readRequestBody(req) : '';
+  // 【2026-07-26・IMPL_PROMPT_20260724 Phase3】クライアント(part8.js)が付ける優先度ヒント。
+  // blocking(現在地タイル)/near(近傍分離ジョブ・近傍単体クエリ)/far(それ以外)の3値。
+  // カスタムヘッダ(X-Tile-Priority等)ではなくPOSTボディ末尾の"&priority=..."として送る
+  // (カスタムヘッダを付けると、直接モード[プロキシ不健全時、ブラウザ→overpass-api.deへの
+  // 本物のクロスオリジンリクエスト]でCORSプリフライトが発生し、Overpassが応答しなければ
+  // リクエストごと失敗しかねない。ボディに追加フィールドを足すだけなら「シンプル
+  // リクエスト」のままなのでCORS問題を起こさない)。上流(Overpass本体)・キャッシュキー
+  // ともにこのフィールドを一切知らなくてよいので、ここで検出・除去してから使う。
+  const _pMatch = rawBody.match(/&priority=(blocking|near|far)$/);
+  const priority = _pMatch ? _pMatch[1] : 'far'; // 想定外(ヘッダ無し・古いクライアント等)は安全側でfar
+  const reqBody = _pMatch ? rawBody.slice(0, _pMatch.index) : rawBody;
   const upstreamUrl = api.upstream + rest;
   const cacheKeySource = reqBody ? (upstreamUrl + '|POST|' + reqBody) : upstreamUrl;
   const file = cachePath(api.dir, cacheKeySource);
@@ -482,7 +507,7 @@ async function handleApi(req, res, apiKey) {
     reqBody
       ? { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: reqBody }
       : {},
-    { isAbandoned, isSoloTile }
+    { isAbandoned, isSoloTile, priority }
   );
 
   // 1) キャッシュヒット → 即応答
