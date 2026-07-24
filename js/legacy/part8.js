@@ -108,7 +108,12 @@ function resetOSMTileQueueForJump() {
   osmTileQueuedAt.clear();
   gaveUpTiles.clear();
   osmTileTimeoutBoost.clear();
-  buildingReadyTiles.clear(); // 【Phase1】先行/建物分離ジョブの状態も新しい場所向けに作り直す
+  // 【2026-07-27・IMPL_PROMPT_20260726 修正2(症状Aの大量発生因)】buildingReadyTilesは
+  // roadReadyTilesと同じ「取得済みの記録」であり、消してはいけなかった。ここをclear()
+  // していたせいで、近距離ジャンプのたびに既訪問の全タイルが「道路あり・建物なし」に
+  // 化け、建物の無駄な再取得が大量発生(リクエスト増→429→グローバルクールダウンで
+  // 全タイル凍結)する一因になっていた。buildingQueuedTiles(キュー状態、消してよい)だけ
+  // クリアする。
   buildingQueuedTiles.clear();
 }
 let _osmMoveUx = 0, _osmMoveUz = 0; // プレイヤーの進行方向(単位ベクトル)。取得順の前方優先に使う
@@ -696,17 +701,16 @@ async function fetchOSMTileBatch() {
     const waitedMs = Date.now() - (osmTileQueuedAt.get(tileStateKey(t.tx, t.tz, t.kind)) || Date.now());
     const agingTiebreak = Math.min(100, waitedMs / 600); // 60秒で頭打ち、最大100(階層間ギャップ10000より十分小さい)
     if (_blockingTiles.has(_posKey(t))) return base - agingTiebreak - 100000; // 建物生成を直接ブロックしている分は最優先
-    if (Math.abs(t.tx - _pTileX) <= NEAR_TIER_R && Math.abs(t.tz - _pTileZ) <= NEAR_TIER_R) {
-      // 【2026-07-26・実機報告「建物生成が遅い、緑緑赤が多い」への対応】近傍分離ジョブ
-      // (kind='road'/'building')はリクエスト数が実質2倍になるため、新しく近傍圏内に
-      // 入ってくる別タイルの道路ジョブが、既に道路確定済みで建物クエリだけ残っている
-      // タイルより先に処理され続けると、そのタイルの建物がいつまでも埋まらない。
-      // building後追いジョブ(=道路は既に確定済みで、あと1回の軽量クエリで完結する)は、
-      // 同じ近傍階層内でも常に先に処理する(階層間ギャップ10000に対して十分小さい50を
-      // 追加で引くだけなので、階層自体を跨いだ逆転は起きない)。
-      const buildingFollowupBonus = (t.kind === 'building') ? 50 : 0;
-      return base - agingTiebreak - 10000 - buildingFollowupBonus;
-    }
+    // 【2026-07-27・IMPL_PROMPT_20260726 修正5(症状Aの補助因)】建物後追いジョブ
+    // (kind='building')は、投入された時点で既に道路確定済みだった元近傍タイル(=有限集合、
+    // 無制限には増えない)。以前は下のNEAR_TIER_R距離判定の中でしか近傍tierオフセットを
+    // 付けていなかったため、プレイヤーが移動してそのタイルが現在の近傍圏外に出ると
+    // オフセット0(外周tier)に落ち、階層ギャップ10000・agingTiebreak上限100では絶対に
+    // 追いつけないまま恒久的に後回しにされていた(道路は確定済みで建物だけ埋まらない
+    // 「緑緑赤」の一因)。距離に関係なく常に近傍tierオフセットで扱う(blocking(-100000)
+    // より上には行かないため現在地優先は崩れない)。
+    if (t.kind === 'building') return base - agingTiebreak - 10000 - 50;
+    if (Math.abs(t.tx - _pTileX) <= NEAR_TIER_R && Math.abs(t.tz - _pTileZ) <= NEAR_TIER_R) return base - agingTiebreak - 10000; // 近傍3x3は外側より先
     return base - agingTiebreak;
   };
   // 【2026-07-17・Fable5診断】距離だけでなく、backoff中(osmTileNextRetryAtが未来)の
@@ -893,13 +897,26 @@ async function fetchOSMTileBatch() {
       // 【2026-07-17・Fable5診断】キーはkeys[0](tx,tz=浮動原点からの相対座標)ではなく
       // bboxes[0](絶対緯度経度)を使う。原点はジャンプごとに付け替わるため、相対座標を
       // キーにすると別都市のタイルと衝突していた(詳細はOSM_TILE_CACHE_VER宣言部参照)。
-      const cached = await osmCacheGet(cacheKeyFor(bboxes[0]));
+      let cached = await osmCacheGet(cacheKeyFor(bboxes[0]));
+      let effKind = batchKind;
+      if (!cached && (batchKind === 'road' || batchKind === 'building')) {
+        // 【2026-07-27・IMPL_PROMPT_20260726 修正4(症状B悪化因)】既訪問エリアのキャッシュは
+        // 複合クエリ時代のキー(bbox素のまま)で保存されている。分離ジョブはkindサフィックス
+        // 付きキー(bbox|road / bbox|building)でしか照会していなかったため、複合クエリ時代に
+        // 取得済みのはずのタイルもキャッシュミス扱いになり、全部ネットワーク再取得になって
+        // いた(リクエスト倍増→429→osmGlobalCooldownUntil最大120秒で全タイル凍結の一因)。
+        // kindキーでミスしたら複合キー(bbox素のまま)でも照会し、ヒットしたら複合データ
+        // として道路・建物とも確定させる(processTileDataはseenOSMWaysで重複排除されるため、
+        // 建物ジョブに複合データを渡しても道路等の二重登録は起きない)。
+        cached = await osmCacheGet(bboxes[0]);
+        if (cached) effKind = undefined;
+      }
       if (cached) {
         // 【2026-07-26・Phase2】await の間にマップジャンプが起きていたら(=世代が変わって
         // いたら)、このタイルはもう関係ない場所の話。ワールドには反映せず静かに捨てる。
         if (myEpoch === osmEpoch) {
           processTileData(cached, 1);
-          markTileSuccess(keys[0], stateKeys[0], batchKind);
+          markTileSuccess(keys[0], stateKeys[0], effKind);
           // 【2026-07-19】以前はkeys.includes(ptKey)=自タイル1枚が届いた時点で「表示しました」に
           // 差し替えていたが、建物はosmTilesReadyAround(64m)で隣接タイルも待つため、トーストが
           // 消えた後も建物だけしばらく生成されない「表示は完了なのに実際は空」の乖離があった
@@ -1179,18 +1196,27 @@ function checkOSMTiles() {
     // 診断用。新規キュー投入時刻を記録し、デバッグオーバーレイでfetching状態のタイルが
     // 何ms待たされているかを見えるようにする(キュー優先順位の問題か、実際に取得に
     // 時間がかかっているだけかを切り分ける)。
+    // 【2026-07-27・IMPL_PROMPT_20260726 修正1(症状Aの主因)】以前はこの「roadReady済みで
+    // buildingがまだなら建物ジョブを積む」分岐がisNearSplit(3x3圏内)の中にしか無かった。
+    // 建物ジョブが1回失敗するとcatch節でbuildingQueuedTilesから外れ、以後の再投入は
+    // このqueueTile頼みになるが、プレイヤーが移動してタイルが3x3の外に出るとisNearSplitが
+    // falseになり、下のgeneric分岐(`!queuedTiles.has(key)`)に落ちる。queuedTilesは道路
+    // ジョブ投入時に立てたまま消えない(成功してもcatch失敗時以外は削除されない)ため、
+    // このガードでbailし、建物ジョブが二度と積まれなくなっていた(=roadReady/building未到達
+    // のまま恒久固着。osmTilesReadyAroundはbuildingReady必須のため周辺チャンク生成ごと
+    // 永久ブロックされる、「緑緑赤が恒久停止」症状の主因)。isNearSplit判定の外(全域)に
+    // 出し、3x3を出た後も建物ジョブを追いかけられるようにする。
+    if (roadReadyTiles.has(key)) {
+      queuedTiles.add(key); // オーバーレイのqueued判定・genericガードとの整合を保つ
+      if (!buildingReadyTiles.has(key) && !buildingQueuedTiles.has(key)) {
+        buildingQueuedTiles.add(key);
+        osmTileQueue.push({ tx, tz, kind: 'building' });
+        osmTileQueuedAt.set(tileStateKey(tx, tz, 'building'), Date.now());
+      }
+      return;
+    }
     const isNearSplit = Math.abs(tx - _qPTileX) <= NEAR_SPLIT_TIER_R && Math.abs(tz - _qPTileZ) <= NEAR_SPLIT_TIER_R;
     if (isNearSplit) {
-      // 既に(複合クエリ等で)道路が確定済みなら、道路ジョブは不要。建物がまだなら
-      // 建物ジョブだけ追加する(移動でタイルが新たにtier1+2圏内に入ったケース)。
-      if (roadReadyTiles.has(key)) {
-        if (!buildingReadyTiles.has(key) && !buildingQueuedTiles.has(key)) {
-          buildingQueuedTiles.add(key);
-          osmTileQueue.push({ tx, tz, kind: 'building' });
-          osmTileQueuedAt.set(tileStateKey(tx, tz, 'building'), Date.now());
-        }
-        return;
-      }
       if (!queuedTiles.has(key)) {
         queuedTiles.add(key);
         osmTileQueue.push({ tx, tz, kind: 'road' });
