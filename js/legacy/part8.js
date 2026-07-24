@@ -735,11 +735,19 @@ async function fetchOSMTileBatch() {
     // 【2026-07-27・ユーザー判断】ただし同じ近傍帯の中では「まだ道路すら取れていない
     // 新しいタイル」を「既に道路が終わって建物だけ残っているタイル」より先に処理する方針に
     // 変更(Step Aで建物ジョブが消えて二度と来なくなるバグは修正済みのため、建物を
-    // 多少後回しにしても迷子になるリスクは無い)。-50(僅かなペナルティ)を+50(僅かに
-    // 手前へ)から符号反転させることで、同じ近傍帯内での道路>建物の順序にする
-    // (帯自体は変わらないので、外周tierに落ちて飢餓するという元のバグは再発しない)。
-    if (t.kind === 'building') return base - agingTiebreak - 10000 + 50;
-    if (Math.abs(t.tx - _pTileX) <= NEAR_TIER_R && Math.abs(t.tz - _pTileZ) <= NEAR_TIER_R) return base - agingTiebreak - 10000; // 近傍3x3は外側より先
+    // 多少後回しにしても迷子になるリスクは無い)。
+    // 【2026-07-27・ユーザー報告「tier2緑緑赤・tier3緑緑黄で順序が前後」への対応】
+    // 従来はtier2(分離ゾーン、NEAR_SPLIT_TIER_R=1、3x3)とtier3(NEAR_TIER_R=2、5x5の
+    // 残り16枚)を同じ-10000帯にまとめていた。tier3は道路・建物が分離されておらず1回の
+    // クエリで同時に届くため、そのクエリが完了すると「tier2はまだ道路のみ・建物追いかけは
+    // 後回し」の状態を追い越して先にtier3の建物が仕上がる、という近さの逆転が起きていた
+    // (agingTiebreak(最大100)がtier2/tier3間の生の距離差(1〜2程度)よりずっと大きく、
+    // 待ち時間次第で簡単に逆転しうる点も一因)。tier2(分離ゾーン、道路・建物ジョブとも)と
+    // tier3(複合クエリ)を別帯に分離し、両者の差(1000)をagingTiebreak上限(100)より
+    // 十分大きく取ることで、待ち時間に関わらずtier2がtier3を追い越さないようにする。
+    if (t.kind === 'building') return base - agingTiebreak - 10000 + 80; // tier2帯内、道路よりわずかに後(ユーザー選択の道路優先)
+    if (Math.abs(t.tx - _pTileX) <= NEAR_SPLIT_TIER_R && Math.abs(t.tz - _pTileZ) <= NEAR_SPLIT_TIER_R) return base - agingTiebreak - 10000; // tier1+2(分離ゾーン)
+    if (Math.abs(t.tx - _pTileX) <= NEAR_TIER_R && Math.abs(t.tz - _pTileZ) <= NEAR_TIER_R) return base - agingTiebreak - 9000; // tier3(複合クエリ)。tier2より明確に一段下
     return base - agingTiebreak;
   };
   // 【2026-07-17・Fable5診断】距離だけでなく、backoff中(osmTileNextRetryAtが未来)の
