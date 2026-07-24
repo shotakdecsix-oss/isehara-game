@@ -211,12 +211,21 @@ function updateDebugTileOverlay(force) {
     // 今はfetchOSMTileBatch(part8.js)側でインフラ障害を除外した専用カウンタ
     // (osmTileHardFailCount)を使って「本当に諦めた」タイルだけをgaveUpTilesへ登録するので、
     // ここでは再計算せずそのSetをそのまま参照する(単一の真実の情報源にする)。
-    const gaveUp = gaveUpTiles.has(key);
+    // 【2026-07-26・IMPL_PROMPT_20260724 Phase1】近傍(tier1+2)は道路/建物が別ジョブになり、
+    // gaveUpTilesもkind別のstateKey("tx,tz|road"/"tx,tz|building")で登録されることがある
+    // (tier3以遠・従来の複合クエリは今まで通り"tx,tz"のまま)。表示上はどちらのkindで
+    // 諦めたのかを区別して見せる(道路が届いてるのに建物だけ諦めた場合を紫と誤認しないため)。
+    const gaveUpRoad = gaveUpTiles.has(key) || gaveUpTiles.has(key + '|road');
+    const gaveUpBuilding = gaveUpTiles.has(key) || gaveUpTiles.has(key + '|building');
+    // 建物データそのものの到達状況。tier1+2の分離ジョブでは道路確定(roadReady)と建物到達
+    // (buildingReadyTiles)が別タイミングになるため、buildColorはbuildingReadyTilesを見る。
+    const buildingArrived = buildingReadyTiles.has(key);
     let status;
     if (!queued) status = 'unqueued';
     else if (!roadReady) status = 'fetching';
-    else if (gaveUp) status = 'gaveUp';
+    else if (gaveUpRoad) status = 'gaveUp';
     else if (!terrainReady) status = 'waitTerrain';
+    else if (!buildingArrived) status = 'buildingPending'; // 建物クエリ待ち(道路は確定済み)
     else if (roadMeshPending > 0 || pending > 0) status = 'buildingPending';
     else status = 'done';
     // 【2026-07-21・ユーザー要望】道路生成が「地形は緑なのに赤いまま」滞留するパターンの
@@ -241,12 +250,14 @@ function updateDebugTileOverlay(force) {
       : terrainReady ? DEBUG_LAYER_COLORS.ready : DEBUG_LAYER_COLORS.waiting;
     let roadColor;
     if (!queued) roadColor = DEBUG_LAYER_COLORS.notReady;
-    else if (gaveUp) roadColor = DEBUG_LAYER_COLORS.gaveUp;
+    else if (gaveUpRoad) roadColor = DEBUG_LAYER_COLORS.gaveUp;
     else if (!roadReady) roadColor = DEBUG_LAYER_COLORS.fetching;
     else if (roadMeshPending > 0) roadColor = DEBUG_LAYER_COLORS.pending;
     else roadColor = DEBUG_LAYER_COLORS.ready;
     let buildColor;
     if (!queued || !roadReady) buildColor = DEBUG_LAYER_COLORS.notReady; // データ未着でまだ判定不能
+    else if (gaveUpBuilding && !buildingArrived) buildColor = DEBUG_LAYER_COLORS.gaveUp; // 建物クエリだけ諦めた(道路は確定済み)
+    else if (!buildingArrived) buildColor = DEBUG_LAYER_COLORS.fetching; // 道路確定済みだが建物クエリ(後追い)がまだ
     else if (pending > 0) buildColor = DEBUG_LAYER_COLORS.pending;
     else buildColor = DEBUG_LAYER_COLORS.ready;
     group.terrainMesh.material.color.setHex(terrainColor);

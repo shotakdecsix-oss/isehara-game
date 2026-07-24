@@ -17,6 +17,16 @@ const queuedTiles = new Set();   // キュー投入済み(取得中 or 取得完
 const roadReadyTiles = new Set();    // 実際に処理が完了した(道路が確定した)タイル。
                                       // 「地形→道路→建物→木」の順を守るため、チャンクの
                                       // 建物生成はこれで判定してカバー範囲のタイルを待つ。
+// 【2026-07-26・IMPL_PROMPT_20260724 Phase1】近傍(現在地+周囲1列=3x3=9枚、NEAR_SPLIT_TIER_R
+// 参照)は道路・線路・水域・landuse(先行クエリ)と建物(後追いクエリ)の2段階に分離する。
+// roadReadyTilesは従来通り「先行クエリ(建物以外)が確定したか」の意味のまま使い続け
+// (チャンク生成ゲートosmTilesReadyAround/chunkTilesReadyは変更不要)、建物データ自体が
+// 届いたかどうかは別途このSetで管理する。tier3以遠・従来の複合クエリでも、成功時に
+// 道路と同時にここへ追加する(1回のクエリで両方揃うため)。デバッグオーバーレイの
+// 建物列がこれを見て、「道路確定済みだが建物クエリはまだ」の状態を正しくpending扱いにする。
+const buildingReadyTiles = new Set();
+// 後追い建物クエリの二重投入防止(queueTileが移動のたびに呼ばれるため必要)。
+const buildingQueuedTiles = new Set();
 const osmTileQueue = [];
 // タイル取得の同時実行数。以前は1件ずつ完全直列だったため、ダッシュ(最大45m/s)で
 // 移動すると描写エリアの拡大がまったく追いつかず、未読み込みの端に突き当たっていた。
@@ -85,6 +95,8 @@ function resetOSMTileQueueForJump() {
   osmTileQueuedAt.clear();
   gaveUpTiles.clear();
   osmTileTimeoutBoost.clear();
+  buildingReadyTiles.clear(); // 【Phase1】先行/建物分離ジョブの状態も新しい場所向けに作り直す
+  buildingQueuedTiles.clear();
 }
 let _osmMoveUx = 0, _osmMoveUz = 0; // プレイヤーの進行方向(単位ベクトル)。取得順の前方優先に使う
 const osmTileFailCount = new Map(); // タイルごとの失敗回数(3回まで再試行)
@@ -123,6 +135,15 @@ let _osm429Streak = 0;
 // 一時的に戻す(=無限に短いtimeoutで再試行し続けて同じ理由で失敗し続けることを防ぐ)。
 // 成功したら通常の短い宣言値に戻す(下のkeys.forEachでdelete)。
 const osmTileTimeoutBoost = new Set();
+// 【2026-07-26・IMPL_PROMPT_20260724 Phase1】失敗カウント・backoff・timeoutBoost・gaveUp判定
+// (osmTileFailCount/osmTileHardFailCount/osmTileNextRetryAt/osmTileQueuedAt/gaveUpTiles/
+// osmTileTimeoutBoost)は、tier1+2(近傍分離クエリ)では道路ジョブと建物ジョブを別ライフ
+// サイクルで管理する必要がある(建物クエリの失敗で道路の再試行履歴を汚さないため)。
+// 既存のMap/Setは変えず、キーだけkind別に分ける(combined/未指定は従来どおり"tx,tz"の
+// ままにして後方互換を保つ)。
+function tileStateKey(tx, tz, kind) {
+  return (kind === 'road' || kind === 'building') ? `${tx},${tz}|${kind}` : `${tx},${tz}`;
+}
 // 【重要】標高データ+初期OSMのロード完了までタイル取得を止めるゲート。
 // 以前は起動直後からタイル取得が走り、標高ロード(約8秒)より先に完了した
 // 境界タイルの道路が「平坦な地面の高さ」で生成され、その後地形が持ち上がると
@@ -415,7 +436,7 @@ function processOSMTileQueue() {
     // 再試行可能なタイルが1件も無ければ、次の機会(checkOSMTilesの周期呼び出し=
     // 最大0.5秒後)まで待つ。
     const now = Date.now();
-    const hasEligible = osmTileQueue.some(t => (osmTileNextRetryAt.get(t.tx + ',' + t.tz) || 0) <= now);
+    const hasEligible = osmTileQueue.some(t => (osmTileNextRetryAt.get(tileStateKey(t.tx, t.tz, t.kind)) || 0) <= now);
     if (!hasEligible) break;
     osmTileActiveCount++;
     fetchOSMTileBatch();
@@ -444,6 +465,14 @@ const OSM_TILE_CLAUSES = [
   // 学校・大学・病院の敷地(校庭・構内に手続き生成の家を置かないための回避ゾーン用)
   'way["amenity"~"school|university|college|hospital"]',
 ];
+// 【2026-07-26・IMPL_PROMPT_20260724 Phase1】近傍(tier1+2)限定で道路・線路・水域・landuse
+// (建物以外)と建物を2段階に分けるための条件節。OSM_TILE_CLAUSESから建物系だけを分離した
+// 差分なので、内容としてはOSM_TILE_CLAUSESと重複しない(足し合わせれば元に戻る)。
+const OSM_TILE_CLAUSES_BUILDING = ['way["building"]', 'relation["building"]'];
+const OSM_TILE_CLAUSES_ROAD = OSM_TILE_CLAUSES.filter(c => !OSM_TILE_CLAUSES_BUILDING.includes(c));
+// 【2026-07-26】近傍の道路/建物分離クエリの対象範囲。tier1(現在地1枚)+tier2(周囲1列8枚)の
+// Chebyshev距離1以内=3x3=9枚。tier3(周囲2列目、距離2)以遠は変更せず従来の複合クエリのまま。
+const NEAR_SPLIT_TIER_R = 1;
 // 1リクエストにまとめる最大タイル数。スポーン直後・地図ジャンプ直後・急旋回時は
 // 一度に何十枚も新規タイルが必要になるが、Overpassは1ホスト1.1秒間隔の直列制限
 // (server.js)のため「1タイル=1リクエスト」だと平常時の10〜数十倍待たされていた。
@@ -475,9 +504,14 @@ const OSM_TILE_CLAUSES = [
 // 以上より、実測で完全応答を確認済みの3に戻す(6は密集地でリバースプロキシ側の硬い504が
 // 出るため不可)。部分応答が来てもcount検証が弾いて再試行される。
 const OSM_TILE_BATCH = 3;
-function buildOSMBatchQuery(bboxes, boosted) {
+// 【2026-07-26・IMPL_PROMPT_20260724 Phase1】kind='road'なら建物以外、kind='building'なら
+// 建物のみの条件節を使う。kind未指定(combined、従来どおり)は全種別。
+function buildOSMBatchQuery(bboxes, boosted, kind) {
+  const clauses = kind === 'road' ? OSM_TILE_CLAUSES_ROAD
+    : kind === 'building' ? OSM_TILE_CLAUSES_BUILDING
+    : OSM_TILE_CLAUSES;
   const parts = [];
-  for (const clause of OSM_TILE_CLAUSES) for (const bb of bboxes) parts.push(clause + '(' + bb + ');');
+  for (const clause of clauses) for (const bb of bboxes) parts.push(clause + '(' + bb + ');');
   // 【2026-07-21・Fable5相談】宣言timeoutはOverpassのコスト見積り(≒スロット占有時間)に
   // 直結するため、実測(3タイルまとめ≒14秒で完了)に対して十分な余裕を持たせつつ、
   // 従来値(20+n*6、3枚で38秒)より短くしてスロット占有時間を縮める。ただし京橋・八重洲
@@ -625,6 +659,11 @@ async function fetchOSMTileBatch() {
   // 前方タイルが後回しになることがあった。進行方向(checkOSMTilesで更新される
   // _osmMoveUx/Uz)への射影ぶんスコアを引いて、同距離なら前方を必ず先に取得する。
   // 係数0.8: 前方1タイル先 ≒ 横0.8タイルぶん優先(後方タイルは射影が負なので不利になる)。
+  // 【2026-07-26・IMPL_PROMPT_20260724 Phase1】位置(tx,tz)だけのキーと、道路/建物で
+  // 独立させたい状態(failCount/backoff/queuedAt)用のキーを使い分ける。_blockingTiles・
+  // NEAR_TIER_R判定は「その場所が近いか」という位置の話なのでkindに関係なく位置キーのまま、
+  // 失敗回数・backoff・待ち時間計測はkind別のtileStateKeyを使う。
+  const _posKey = (t) => t.tx + ',' + t.tz;
   const _tileScore = (t) => {
     const dx = t.tx + 0.5 - ptx, dz = t.tz + 0.5 - ptz;
     const base = Math.abs(dx) + Math.abs(dz) - (dx * _osmMoveUx + dz * _osmMoveUz) * 0.8;
@@ -641,10 +680,9 @@ async function fetchOSMTileBatch() {
     // 十分小さく、階層を跨いでの逆転は起こり得ない)。これにより、外側タイル同士の中で
     // 「一番待たされている物」が優先されるようになり(=特定タイルだけが恒常的に
     // 後回しにされ続ける飢餓は解消)、近傍優先の原則自体は変えない。
-    const _tk = t.tx + ',' + t.tz;
-    const waitedMs = Date.now() - (osmTileQueuedAt.get(_tk) || Date.now());
+    const waitedMs = Date.now() - (osmTileQueuedAt.get(tileStateKey(t.tx, t.tz, t.kind)) || Date.now());
     const agingTiebreak = Math.min(100, waitedMs / 600); // 60秒で頭打ち、最大100(階層間ギャップ10000より十分小さい)
-    if (_blockingTiles.has(_tk)) return base - agingTiebreak - 100000; // 建物生成を直接ブロックしている分は最優先
+    if (_blockingTiles.has(_posKey(t))) return base - agingTiebreak - 100000; // 建物生成を直接ブロックしている分は最優先
     if (Math.abs(t.tx - _pTileX) <= NEAR_TIER_R && Math.abs(t.tz - _pTileZ) <= NEAR_TIER_R) return base - agingTiebreak - 10000; // 近傍3x3は外側より先
     return base - agingTiebreak;
   };
@@ -652,7 +690,7 @@ async function fetchOSMTileBatch() {
   // タイルは近さに関係なく後ろへ回す。以前は「近い順」だけだったため、直近で失敗した
   // 近傍タイルが再試行間隔を無視して毎回先頭に来て連打されてしまっていた。
   const _now = Date.now();
-  const _tileKey = (t) => t.tx + ',' + t.tz;
+  const _tileKey = (t) => tileStateKey(t.tx, t.tz, t.kind);
   osmTileQueue.sort((a, b) => {
     const ra = (osmTileNextRetryAt.get(_tileKey(a)) || 0) > _now ? 1 : 0;
     const rb = (osmTileNextRetryAt.get(_tileKey(b)) || 0) > _now ? 1 : 0;
@@ -683,7 +721,7 @@ async function fetchOSMTileBatch() {
   // 1回目の失敗はまず既定バッチサイズのまま(混雑等の一時的な要因の可能性を優先して)
   // 再試行させ、リクエスト数の急増を防ぐ。
   const nextTile = osmTileQueue[0];
-  const nextFailCount = nextTile ? (osmTileFailCount.get(nextTile.tx + ',' + nextTile.tz) || 0) : 0;
+  const nextFailCount = nextTile ? (osmTileFailCount.get(_tileKey(nextTile)) || 0) : 0;
   // 【2026-07-16】プレイヤー近傍のタイルは常に1枚クエリ。実測で1枚=1〜1.5秒、
   // 3枚まとめ=10〜30秒(密集地)なので、体感を決める近傍タイルだけ小さく速く取る。
   // 1枚クエリはIndexedDBキャッシュの対象にもなる(キャッシュはタイル単位のため)。
@@ -695,22 +733,31 @@ async function fetchOSMTileBatch() {
   // 近傍のはずのタイルがいつまでも赤(fetching)のまま進まない実機報告につながった。
   // NEAR_TIER_Rに揃え、近傍5×5は丸ごと軽量な1枚クエリにする。
   const nearSolo = nextTile && Math.max(Math.abs(nextTile.tx - _pTileX), Math.abs(nextTile.tz - _pTileZ)) <= NEAR_TIER_R;
-  let batchSize = (!roadReadyTiles.has(ptKey) || nextFailCount >= 2 || nearSolo) ? 1 : OSM_TILE_BATCH;
+  // 【2026-07-26・IMPL_PROMPT_20260724 Phase1】道路/建物の分離ジョブ(kind='road'|'building')
+  // は常に1タイル単体(まとめない。そもそもtier1+2=3x3限定なので数が少なく、まとめる
+  // メリットも薄い)。
+  const isSplitJob = !!(nextTile && (nextTile.kind === 'road' || nextTile.kind === 'building'));
+  let batchSize = isSplitJob ? 1 : ((!roadReadyTiles.has(ptKey) || nextFailCount >= 2 || nearSolo) ? 1 : OSM_TILE_BATCH);
   // 【2026-07-17・Fable5診断】上のソートでbackoff中のタイルは後ろへ回しているが、
   // 先頭からbatchSize件がたまたまbackoff中のタイルを含んでしまう(=eligibleが
   // batchSize未満しか無い)場合に備え、先頭からの「再試行可能な連続数」に丸める
   // (processOSMTileQueue側で先頭1件は必ず再試行可能であることを保証済み)。
+  // 【2026-07-26】異なるkindが同じバッチに混ざらないよう、先頭と同じkindが連続する
+  // 範囲に限定する(道路ジョブと建物ジョブ、複合クエリを取り違えて1クエリにまとめない)。
   let eligibleRun = 0;
   for (const t of osmTileQueue) {
+    if (t.kind !== nextTile.kind) break;
     if ((osmTileNextRetryAt.get(_tileKey(t)) || 0) > _now) break;
     eligibleRun++;
   }
   batchSize = Math.max(1, Math.min(batchSize, eligibleRun));
   const batch = osmTileQueue.splice(0, batchSize); // 近い順(backoff中は後回し)
-  const keys = batch.map(({tx, tz}) => `${tx},${tz}`);
+  const batchKind = batch[0] && batch[0].kind; // 'road'|'building'|undefined(=combined)
+  const keys = batch.map(({tx, tz}) => `${tx},${tz}`); // 位置キー(roadReadyTiles等、道路/建物で共有する状態用)
+  const stateKeys = batch.map(({tx, tz}) => tileStateKey(tx, tz, batchKind)); // 失敗回数・backoff等、kind別に独立させる状態用
   // 【2026-07-25・診断計器】このバッチの処理に実際どれだけ時間がかかっているかを追跡する
   // (finally節で必ず削除。ハング診断用なのでtry本体より前、失敗しうる処理より先に置く)
-  const _fetchStartKey = (++_activeFetchSeq) + ':' + keys.join('|');
+  const _fetchStartKey = (++_activeFetchSeq) + ':' + stateKeys.join('|');
   _activeFetchStarts.set(_fetchStartKey, Date.now());
   const bboxes = batch.map(({tx, tz}) => {
     const worldX0 = tx * OSM_TILE_M, worldZ0 = tz * OSM_TILE_M;
@@ -726,8 +773,8 @@ async function fetchOSMTileBatch() {
   // ブースト(長いtimeout)での再試行という往復が発生し、以前より足元の道路・建物表示が
   // 遅れる退行を実機で確認した。短縮によるスロット節約は、体感への影響が小さい周辺・
   // 遠方タイル(3枚まとめ等)側だけで十分。
-  const boosted = keys.includes(ptKey) || keys.some(k => osmTileTimeoutBoost.has(k));
-  const { query, timeout: osmTimeoutSec } = buildOSMBatchQuery(bboxes, boosted);
+  const boosted = keys.includes(ptKey) || stateKeys.some(k => osmTileTimeoutBoost.has(k));
+  const { query, timeout: osmTimeoutSec } = buildOSMBatchQuery(bboxes, boosted, batchKind);
   let failed = false;
   // 【重要】以前は Promise.race([fetch(...), timeoutPromise]) で「50秒で見切る」だけだった。
   // これはtimeoutPromise側が先に解決してcatchに落ちるだけで、負けた方のfetch自体は
@@ -774,17 +821,49 @@ async function fetchOSMTileBatch() {
   const abortCtl = new AbortController();
   const timeoutId = setTimeout(() => abortCtl.abort(), tileTimeoutMs);
   _activeFetchAborts.set(_fetchStartKey, abortCtl); // マップジャンプ時の一斉abort対象に登録
+  // 【2026-07-26・IMPL_PROMPT_20260724 Phase1】道路/建物分離クエリのキャッシュキーは
+  // 複合クエリ(従来のbboxそのまま)と衝突しないよう、kind別のサフィックスを付ける。
+  const cacheKeyFor = (bbox) => (batchKind === 'road' || batchKind === 'building') ? bbox + '|' + batchKind : bbox;
+  // 【2026-07-26】kind別に「該当レイヤーを既知(=これ以上待っても増えない)にする」処理を
+  // 共通化する。成功時(markTileSuccess)・諦め時(catch節のgaveUp分岐)の両方から呼ぶ。
+  // roadジョブがここに来た場合は、道路確定(チャンク生成ゲート解除は従来通りroadReadyTiles)
+  // に加え、まだ発行していなければ建物ジョブを新規キューへ積む(道路クエリを諦めた場合でも、
+  // 建物クエリは独立して成功しうるので引き続き取得を試みる)。
+  const unlockTileReadiness = (posKey, kind) => {
+    if (kind === 'building') {
+      buildingReadyTiles.add(posKey);
+    } else if (kind === 'road') {
+      roadReadyTiles.add(posKey);
+      if (!buildingReadyTiles.has(posKey) && !buildingQueuedTiles.has(posKey)) {
+        buildingQueuedTiles.add(posKey);
+        const [ptx, ptz] = posKey.split(',').map(Number);
+        osmTileQueue.push({ tx: ptx, tz: ptz, kind: 'building' });
+        osmTileQueuedAt.set(tileStateKey(ptx, ptz, 'building'), Date.now());
+      }
+    } else { // combined(未指定): 1回のクエリで道路・建物とも揃うので両方を確定させる
+      roadReadyTiles.add(posKey);
+      buildingReadyTiles.add(posKey);
+    }
+  };
+  // 【2026-07-26】1タイル分の成功時状態更新(キャッシュヒット時・実フェッチ成功時の両方から呼ぶ)。
+  const markTileSuccess = (posKey, sKey, kind) => {
+    osmTileFailCount.delete(sKey);
+    osmTileHardFailCount.delete(sKey);
+    gaveUpTiles.delete(sKey);
+    osmTileTimeoutBoost.delete(sKey);
+    osmTileQueuedAt.delete(sKey);
+    unlockTileReadiness(posKey, kind);
+  };
   try {
     // 1枚クエリはまずIndexedDBキャッシュを照会(ヒットなら即時復元・ネットワーク不要)
     if (batch.length === 1) {
       // 【2026-07-17・Fable5診断】キーはkeys[0](tx,tz=浮動原点からの相対座標)ではなく
       // bboxes[0](絶対緯度経度)を使う。原点はジャンプごとに付け替わるため、相対座標を
       // キーにすると別都市のタイルと衝突していた(詳細はOSM_TILE_CACHE_VER宣言部参照)。
-      const cached = await osmCacheGet(bboxes[0]);
+      const cached = await osmCacheGet(cacheKeyFor(bboxes[0]));
       if (cached) {
         processTileData(cached, 1);
-        osmTileFailCount.delete(keys[0]);
-        roadReadyTiles.add(keys[0]);
+        markTileSuccess(keys[0], stateKeys[0], batchKind);
         // 【2026-07-19】以前はkeys.includes(ptKey)=自タイル1枚が届いた時点で「表示しました」に
         // 差し替えていたが、建物はosmTilesReadyAround(64m)で隣接タイルも待つため、トーストが
         // 消えた後も建物だけしばらく生成されない「表示は完了なのに実際は空」の乖離があった
@@ -876,19 +955,12 @@ async function fetchOSMTileBatch() {
     if (!Number.isFinite(declared)) throw new Error('incomplete: count element missing');
     if (received < declared) throw new Error(`incomplete: ${received}/${declared} elements`);
     // count検証を通過した完全な1タイル応答だけをIndexedDBへ保存(部分応答の汚染を防ぐ)
-    if (batch.length === 1) osmCachePut(bboxes[0], data); // 保存キーもbboxes[0](絶対座標)に統一
+    if (batch.length === 1) osmCachePut(cacheKeyFor(bboxes[0]), data); // 保存キーもbboxes[0](絶対座標)ベース+kindサフィックス
     _osm429Streak = 0; // 【2026-07-21】完全な応答を受け取れた=不調から回復したとみなし、次回のbackoffを短くリセット
     // 複数タイル分の要素が1つの配列で混ざって届くが、seenOSMWaysでway ID重複排除される
     // ので、1タイルの時と同じ processTileData にそのまま渡してよい。密度計算用にタイル枚数も渡す。
     processTileData(data, batch.length);
-    keys.forEach(k => {
-      osmTileFailCount.delete(k);
-      osmTileHardFailCount.delete(k); // 【2026-07-21・修正5】成功したので諦めカウントも白紙に戻す
-      gaveUpTiles.delete(k);
-      osmTileTimeoutBoost.delete(k); // 【2026-07-21・Fable5相談】成功したので短いtimeout宣言に戻す
-      osmTileQueuedAt.delete(k); // 成功したので待ち時間計測も終了
-      roadReadyTiles.add(k); // このタイルの道路が確定 → 建物生成待ちのチャンクを解放してよい
-    });
+    keys.forEach((k, i) => markTileSuccess(k, stateKeys[i], batchKind));
     // loadOSM()(part6.js)は起動直後に「🗺 マップを読み込み中...」のstickyトーストを
     // 出したまま抜ける(道路・建物の実際の生成はここが担当するため)。
     // 【2026-07-19】完了表示は自タイルだけでなく、建物生成の実際のゲート
@@ -916,16 +988,28 @@ async function fetchOSMTileBatch() {
     // 再試行する時だけ従来の長いtimeout宣言に戻す。同じ理由の失敗を短いtimeoutのまま
     // 何度も繰り返させないための一時的な措置(成功したら上のkeys.forEachで解除)。
     const isTimeout = !!(e && e.wasTimeout);
-    if (isTimeout) keys.forEach(k => osmTileTimeoutBoost.add(k));
-    keys.forEach(k => {
-      const n = (osmTileFailCount.get(k) || 0) + 1;
-      osmTileFailCount.set(k, n); // バックオフ・バッチ縮小判定(nextFailCount)用。挙動不変
+    // 【2026-07-26・Phase1】失敗カウント・backoff・timeoutBoost・gaveUp判定はstateKeys(kind別)で
+    // 管理する。queuedTiles/buildingQueuedTilesからの削除(再投入対象に戻す)だけは位置キー(keys)
+    // かつジョブ種別(batchKind)ごとに別のSetを使う(道路ジョブと建物ジョブは投入経路が違うため)。
+    if (isTimeout) stateKeys.forEach(sk => osmTileTimeoutBoost.add(sk));
+    keys.forEach((k, i) => {
+      const sk = stateKeys[i];
+      const n = (osmTileFailCount.get(sk) || 0) + 1;
+      osmTileFailCount.set(sk, n); // バックオフ・バッチ縮小判定(nextFailCount)用。挙動不変
       if (!isInfra && batch.length === 1) {
-        const h = (osmTileHardFailCount.get(k) || 0) + 1;
-        osmTileHardFailCount.set(k, h);
-        if (h >= 4) { roadReadyTiles.add(k); gaveUpTiles.add(k); } // これ以上は建物生成をブロックしない(道路は背景で取得を続ける)
+        const h = (osmTileHardFailCount.get(sk) || 0) + 1;
+        osmTileHardFailCount.set(sk, h);
+        if (h >= 4) {
+          gaveUpTiles.add(sk);
+          // これ以上は該当レイヤーの生成をブロックしない(=成功時と同じ「既知にする」処理を
+          // 流用する。roadジョブを諦めた場合も、建物クエリ自体は道路データに依存せず独立して
+          // 成功しうるため、まだ発行していなければ建物ジョブを積む=unlockTileReadinessに含む)。
+          unlockTileReadiness(k, batchKind);
+        }
       }
-      queuedTiles.delete(k); // 常に再試行対象に戻す(checkOSMTiles が再度キューに積む)
+      // 常に再試行対象に戻す(checkOSMTiles/queueTile が再度キューに積む)。
+      if (batchKind === 'building') buildingQueuedTiles.delete(k);
+      else queuedTiles.delete(k);
       // 【2026-07-17・Fable5診断】以前はこの後にワーカー自身がsleepして間隔を作っていたが、
       // 枠を握ったままのsleepを撤去したため、代わりにタイルごとの再試行可能時刻をここへ記録する。
       // 【2026-07-18】プレイヤーが今立っているタイル(ptKey)だけは、他の未訪問タイルと
@@ -935,7 +1019,7 @@ async function fetchOSMTileBatch() {
       // _curTileRush・sticky toastなど既存の「現在地タイルだけ特別扱い」方針に合わせ、
       // 現在地タイルだけ短い上限・緩やかな増分のバックオフにする(他タイルは従来通り)。
       const _isCurTile = k === ptKey;
-      osmTileNextRetryAt.set(k, Date.now() + (_isCurTile ? Math.min(5000, 1500 * n) : Math.min(30000, 3000 * n)));
+      osmTileNextRetryAt.set(sk, Date.now() + (_isCurTile ? Math.min(5000, 1500 * n) : Math.min(30000, 3000 * n)));
     });
     // 現在地タイルが4回失敗して「諦めて先に進む」扱いになった場合も、sticky状態のトーストを
     // 出しっぱなしにしない(Overpass不調が長引くと「🗺 マップを読み込み中...」が永久に残るため)。
@@ -1018,6 +1102,9 @@ function checkOSMTiles() {
   let fdx = 0, fdz = 0;
   if (_osmLastPx !== null) { fdx = px - _osmLastPx; fdz = pz - _osmLastPz; }
   _osmLastPx = px; _osmLastPz = pz;
+  // 【2026-07-26・IMPL_PROMPT_20260724 Phase1】近傍(tier1+2、Chebyshev距離<=NEAR_SPLIT_TIER_R
+  // =1、3x3=9枚)の判定用。プレイヤーの現在タイルを基準にする(NEAR_TIER_R判定と同じ考え方)。
+  const _qPTileX = Math.floor(px / OSM_TILE_M), _qPTileZ = Math.floor(pz / OSM_TILE_M);
   const queueTile = (wx, wz) => {
     const tx = Math.floor(wx / OSM_TILE_M), tz = Math.floor(wz / OSM_TILE_M);
     const key = `${tx},${tz}`;
@@ -1025,6 +1112,25 @@ function checkOSMTiles() {
     // 診断用。新規キュー投入時刻を記録し、デバッグオーバーレイでfetching状態のタイルが
     // 何ms待たされているかを見えるようにする(キュー優先順位の問題か、実際に取得に
     // 時間がかかっているだけかを切り分ける)。
+    const isNearSplit = Math.abs(tx - _qPTileX) <= NEAR_SPLIT_TIER_R && Math.abs(tz - _qPTileZ) <= NEAR_SPLIT_TIER_R;
+    if (isNearSplit) {
+      // 既に(複合クエリ等で)道路が確定済みなら、道路ジョブは不要。建物がまだなら
+      // 建物ジョブだけ追加する(移動でタイルが新たにtier1+2圏内に入ったケース)。
+      if (roadReadyTiles.has(key)) {
+        if (!buildingReadyTiles.has(key) && !buildingQueuedTiles.has(key)) {
+          buildingQueuedTiles.add(key);
+          osmTileQueue.push({ tx, tz, kind: 'building' });
+          osmTileQueuedAt.set(tileStateKey(tx, tz, 'building'), Date.now());
+        }
+        return;
+      }
+      if (!queuedTiles.has(key)) {
+        queuedTiles.add(key);
+        osmTileQueue.push({ tx, tz, kind: 'road' });
+        osmTileQueuedAt.set(tileStateKey(tx, tz, 'road'), Date.now());
+      }
+      return;
+    }
     if (!queuedTiles.has(key)) { queuedTiles.add(key); osmTileQueue.push({ tx, tz }); osmTileQueuedAt.set(key, Date.now()); }
   };
   // 【2026-07-16】7x7(49タイル)→5x5(25タイル)に縮小。ジャンプ直後の初期バックログが
