@@ -58,6 +58,34 @@ let osmTileActiveCount = 0;
 // ことの直接証拠になる。
 const _activeFetchStarts = new Map(); // 一意キー → fetchOSMTileBatch開始時刻(Date.now())
 let _activeFetchSeq = 0;
+// 【2026-07-25・ユーザー報告(マップジャンプ後の停滞)対応】各fetchのAbortControllerを
+// 一意キーで保持しておき、マップジャンプ(location.reload直前)に全部まとめてabort()できる
+// ようにする。ジャンプ前の場所のタイル取得は新しい場所には無関係なので、明示的に切断して
+// 早期に諦めさせ、サーバー側のisAbandoned判定(req切断検知)が早く効くようにする狙い。
+const _activeFetchAborts = new Map(); // 一意キー → AbortController
+function abortAllOSMFetches() {
+  for (const ctl of _activeFetchAborts.values()) { try { ctl.abort(); } catch (e) {} }
+}
+// 【2026-07-25・ユーザー報告(300km未満の近距離ジャンプでも同じ詰まりが出る)対応】
+// 遠距離ジャンプ(location.reload)はクライアント側の状態が丸ごと作り直されるが、
+// 近距離ジャンプ(location.reloadしない方の分岐、jumpToLatLon)は同じJS実行環境の
+// ままプレイヤー位置だけ動かすため、前の場所の未処理タイル(osmTileQueue)や
+// 失敗・backoff履歴がそのまま残り続け、新しい場所のタイルがその後ろに並んで
+// 詰まって見えていた。ジャンプ時にこの「タイル取得の待ち行列」だけを明示的に
+// 空にし、新しい場所の分をcheckOSMTilesにいちから積み直させる。
+// roadReadyTiles(既に取得済みの記録)は消さない(誤って再取得させる必要は無く、
+// 実害も無いキャッシュのため)。
+function resetOSMTileQueueForJump() {
+  abortAllOSMFetches(); // 前の場所を追いかけている進行中のfetchを中断
+  osmTileQueue.length = 0; // 未処理の待ち行列を空に(新しい場所はcheckOSMTilesが積み直す)
+  queuedTiles.clear();
+  osmTileFailCount.clear();
+  osmTileHardFailCount.clear();
+  osmTileNextRetryAt.clear();
+  osmTileQueuedAt.clear();
+  gaveUpTiles.clear();
+  osmTileTimeoutBoost.clear();
+}
 let _osmMoveUx = 0, _osmMoveUz = 0; // プレイヤーの進行方向(単位ベクトル)。取得順の前方優先に使う
 const osmTileFailCount = new Map(); // タイルごとの失敗回数(3回まで再試行)
 // 【2026-07-21・ユーザー要望】道路生成の遅延診断用: タイルが新規キュー投入された時刻。
@@ -745,6 +773,7 @@ async function fetchOSMTileBatch() {
   const tileTimeoutMs = _curTileInBatch ? Math.max(osmTimeoutSec * 1000 + 8000, 70000) : osmTimeoutSec * 1000 + 8000;
   const abortCtl = new AbortController();
   const timeoutId = setTimeout(() => abortCtl.abort(), tileTimeoutMs);
+  _activeFetchAborts.set(_fetchStartKey, abortCtl); // マップジャンプ時の一斉abort対象に登録
   try {
     // 1枚クエリはまずIndexedDBキャッシュを照会(ヒットなら即時復元・ネットワーク不要)
     if (batch.length === 1) {
@@ -917,6 +946,7 @@ async function fetchOSMTileBatch() {
   } finally {
     clearTimeout(timeoutId); // 成功時に残ったタイマー自体の掃除(abort()は既に完了済みのfetchには無害)
     _activeFetchStarts.delete(_fetchStartKey); // 診断計器の後片付け(成功・失敗いずれでも必ず消す)
+    _activeFetchAborts.delete(_fetchStartKey);
   }
   // 【2026-07-17・Fable5診断】以前は失敗時、待ち時間(最大30秒)をこのワーカーが
   // concurrency枠(OSM_TILE_CONCURRENCY=3)を握ったままsleepしていたため、密集地で

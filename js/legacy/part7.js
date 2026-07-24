@@ -99,7 +99,14 @@ function jumpToLatLon(toLat, toLon) {
       localStorage.setItem('iseharaResumePos',
         JSON.stringify({ lat: toLat, lon: toLon, yaw: camYaw, rot: player.rotation.y }));
     } catch (e) {}
-    location.reload();
+    // 【2026-07-25・ユーザー報告対応】マップジャンプ後、前の場所のタイル取得がサーバー側の
+    // キュー(server.jsのレーン)に残ったままだと、新しい場所のリクエストがその後ろに並んで
+    // 長時間「緑赤灰」のまま停滞することがあった。reloadでクライアント側の状態は真っさらに
+    // なるが、既にネットワークに出ている古いfetchはそのままではサーバー側にリクエストとして
+    // 残り続けるため、reload直前に明示的に全部abort()し、少し待ってから実際にreloadする
+    // ことで、サーバー側のisAbandoned判定(接続切断検知)が早く効くようにする。
+    if (typeof abortAllOSMFetches === 'function') abortAllOSMFetches();
+    setTimeout(() => location.reload(), 50);
     return;
   }
   const pos = latLonToXZ(toLat, toLon);
@@ -107,6 +114,11 @@ function jumpToLatLon(toLat, toLon) {
   const farJump = !wideElev ||
     Math.abs(pos.x - wideCX) > WIDE_W * 0.32 || Math.abs(pos.z - wideCZ) > WIDE_D * 0.32;
   player.position.set(pos.x, 0, pos.z); // yはanimateの床追従が合わせる
+  // 【2026-07-25・ユーザー報告対応】300km未満の近距離ジャンプはreloadしないため、前の場所の
+  // 未処理タイル(osmTileQueue)がそのまま残って新しい場所のタイルの前に並んでしまい、
+  // 遠距離ジャンプと同じ「緑赤灰」の長時間停滞が起きていた。ここでタイル取得の待ち行列を
+  // 明示的に空にし、新しい場所の分をいちから積み直させる(詳細はpart8.js側コメント参照)。
+  if (typeof resetOSMTileQueueForJump === 'function') resetOSMTileQueueForJump();
   // 【重要】checkOSMTiles(part8.js)の進行方向バイアスは「前回チェック時位置→現在位置」の
   // 差分ベクトルで進行方向を推定している。ジャンプ直後にこれをそのまま使うと、テレポート量
   // (数百m〜数百km)がまるごと「進行方向」として扱われてしまい、プレイヤーの意図(向いている
